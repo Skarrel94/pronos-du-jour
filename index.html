@@ -22,6 +22,9 @@
       <h1>Pronos <em>du Jour</em></h1>
       <p id="date" class="date"></p>
     </div>
+    <button id="open-settings" class="icon-btn" type="button" aria-label="Réglages des cotes">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z M19.4 13a7.6 7.6 0 0 0 0-2l2-1.6-2-3.4-2.4 1a7.4 7.4 0 0 0-1.7-1L15 3.5h-4l-.4 2.5a7.4 7.4 0 0 0-1.7 1l-2.4-1-2 3.4 2 1.6a7.6 7.6 0 0 0 0 2l-2 1.6 2 3.4 2.4-1c.5.4 1.1.7 1.7 1l.4 2.5h4l.4-2.5c.6-.3 1.2-.6 1.7-1l2.4 1 2-3.4-2-1.6Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+    </button>
     <button id="refresh" class="refresh" type="button">
       <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
       <span id="refresh-label">Actualiser</span>
@@ -41,6 +44,11 @@
   <div id="stale" class="stale" hidden>
     <span>Ces données datent d'un autre jour.</span>
     <button id="stale-refresh" type="button">Actualiser maintenant</button>
+  </div>
+
+  <div id="odds-hint" class="stale" hidden>
+    <span>Les cotes Betclic et Winamax affichées sont estimées. Ajoutez une clé gratuite pour voir les vraies cotes.</span>
+    <button id="odds-hint-open" type="button">Ajouter une clé</button>
   </div>
 
   <div id="record" class="record" hidden></div>
@@ -69,9 +77,30 @@
 
   <footer class="foot">
     <p><b>18+ · Jouer comporte des risques : endettement, isolement, dépendance.</b> Pour être aidé, appelez le 09 74 75 13 13 (appel non surtaxé).</p>
-    <p>Les pronostics sont des estimations statistiques calculées à partir des bilans, de la forme et, quand elles sont publiées, des cotes du marché. Aucun gain n'est garanti. Données : ESPN.</p>
+    <p>Les pronostics sont des estimations statistiques calculées à partir des bilans, de la forme des compositions d'équipe et des cotes du marché. Seuls les compétitions et types de paris proposés par Betclic et Winamax sont affichés. Aucun gain n'est garanti. Données : ESPN, The Odds API.</p>
   </footer>
 </main>
+
+<dialog id="settings" class="sheet" aria-labelledby="settings-title">
+  <form id="settings-form">
+    <h2 id="settings-title">Vraies cotes Betclic et Winamax</h2>
+    <p>L’app lit les cotes réelles via <b>The Odds API</b>. La clé est gratuite (500 crédits par mois) :</p>
+    <ol>
+      <li>Allez sur <a href="https://the-odds-api.com/#get-access" target="_blank" rel="noopener">the-odds-api.com</a> et choisissez l’offre <b>Starter (gratuite)</b>.</li>
+      <li>Copiez la clé reçue par e-mail et collez-la ci-dessous.</li>
+    </ol>
+    <label for="api-key">Clé The Odds API</label>
+    <input id="api-key" type="text" autocomplete="off" spellcheck="false" placeholder="ex. 3f9c…">
+    <label for="max-credits">Crédits maximum par actualisation</label>
+    <input id="max-credits" type="number" min="1" max="100" step="1" inputmode="numeric">
+    <p class="hint">Une compétition coûte 1 à 3 crédits. Avec 15 crédits par jour, l’offre gratuite tient tout le mois. Les compétitions qui ont le plus de matchs passent en premier.</p>
+    <p id="credits" class="hint"></p>
+    <div class="sheet-actions">
+      <button type="button" id="settings-cancel" class="ghost">Annuler</button>
+      <button type="submit" class="primary">Enregistrer</button>
+    </div>
+  </form>
+</dialog>
 
 <div id="toast" class="toast" role="status" hidden></div>
 

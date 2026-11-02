@@ -3,7 +3,8 @@
 // Moteur de pronostics : transforme les données d'un match en probabilités par type de pari.
 // Principe : une note de force par équipe (bilan + forme + domicile/extérieur),
 // mélangée avec les probabilités implicites des cotes quand elles existent (le marché est
-// le meilleur estimateur disponible), puis déclinée en marchés (1N2, over/under, handicap...).
+// le meilleur estimateur disponible), corrigée par les compositions d'équipe au football,
+// puis déclinée uniquement en paris proposés par Betclic et Winamax.
 
 const SPORT_CFG = {
   soccer:     { label: 'Football',        home: 0.32, k: 6 },
@@ -16,6 +17,16 @@ const SPORT_CFG = {
   tennis:     { label: 'Tennis',          home: 0 },
   mma:        { label: 'MMA',             home: 0 },
 };
+
+const BOOKS = { betclic: 'Betclic', winamax: 'Winamax' };
+
+// Taux de retour joueur habituels (part de la mise reversée) par type de pari, grands championnats.
+// Sert à estimer la cote Betclic / Winamax quand la vraie cote n'est pas disponible.
+const PAYOUT = {
+  betclic: { ml: 0.915, win: 0.915, dc: 0.895, dnb: 0.905, ou: 0.915, btts: 0.905, hcp: 0.91, sets: 0.89 },
+  winamax: { ml: 0.93, win: 0.93, dc: 0.905, dnb: 0.915, ou: 0.925, btts: 0.915, hcp: 0.92, sets: 0.90 },
+};
+const MINOR_LEAGUE_MALUS = 0.03;
 
 // Poids accordé au marché (cotes) face au modèle statistique.
 const MARKET_WEIGHT = 0.7;
@@ -52,24 +63,43 @@ function poissonPmf(lambda, max = 10) {
   return out;
 }
 
-// Grille des scores exacts (domicile x extérieur) pour deux lois de Poisson indépendantes.
-function scoreGrid(lh, la) {
+// Statistiques d'une grille de scores exacts (domicile x extérieur), lois de Poisson indépendantes.
+function goals(lh, la) {
   const ph = poissonPmf(lh), pa = poissonPmf(la);
-  return ph.map(x => pa.map(y => x * y));
-}
-
-function gridStats(grid) {
   let home = 0, draw = 0, away = 0, btts = 0;
   const totals = {};
   let best = { p: 0, h: 0, a: 0 };
-  grid.forEach((row, h) => row.forEach((p, a) => {
+  ph.forEach((x, h) => pa.forEach((y, a) => {
+    const p = x * y;
     if (h > a) home += p; else if (h === a) draw += p; else away += p;
     if (h > 0 && a > 0) btts += p;
     totals[h + a] = (totals[h + a] || 0) + p;
     if (p > best.p) best = { p, h, a };
   }));
   const over = line => Object.entries(totals).reduce((s, [t, p]) => s + (Number(t) > line ? p : 0), 0);
-  return { home, draw, away, btts, over, best };
+  return { lh, la, home, draw, away, btts, over, best };
+}
+
+// Trouve les buts attendus (domicile, extérieur) qui reproduisent un total et un écart P(dom) - P(ext).
+function fitGoals(total, diff) {
+  let lo = -3, hi = 3;
+  for (let i = 0; i < 40; i++) {
+    const s = (lo + hi) / 2;
+    const g = goals(Math.max(0.05, (total + s) / 2), Math.max(0.05, (total - s) / 2));
+    if (g.home - g.away < diff) lo = s; else hi = s;
+  }
+  const s = (lo + hi) / 2;
+  return goals(Math.max(0.05, (total + s) / 2), Math.max(0.05, (total - s) / 2));
+}
+
+// Nombre total de buts attendu pour qu'une ligne over/under ait la probabilité pOver.
+function totalFromLine(line, pOver) {
+  let lo = 0.8, hi = 5.5;
+  for (let i = 0; i < 40; i++) {
+    const mid = (lo + hi) / 2;
+    if (goals(mid / 2, mid / 2).over(line) < pOver) lo = mid; else hi = mid;
+  }
+  return (lo + hi) / 2;
 }
 
 // ---------- Cotes ----------
@@ -86,6 +116,62 @@ function devig(odds) {
   const sum = inv.reduce((a, b) => a + b, 0);
   if (!sum || inv.some(x => !x)) return null;
   return inv.map(x => x / sum);
+}
+
+// Moyenne des probabilités sans marge de plusieurs sources (Betclic, Winamax...).
+function avgProbs(list) {
+  const ok = list.filter(Boolean);
+  if (!ok.length) return null;
+  return ok[0].map((_, i) => ok.reduce((s, p) => s + p[i], 0) / ok.length);
+}
+
+// Probabilités du marché : cotes Betclic/Winamax réelles d'abord, sinon cotes ESPN (DraftKings).
+function marketMoneyline(m, withDraw) {
+  const fromBooks = avgProbs(Object.values(m.books || {}).map(b => {
+    const ml = b.ml || {};
+    return withDraw ? (ml.D ? devig([ml.H, ml.D, ml.A]) : null) : devig([ml.H, ml.A]);
+  }));
+  if (fromBooks) return { p: fromBooks, src: 'books' };
+  const o = m.odds || {};
+  const dk = withDraw ? (o.draw ? devig([o.home, o.draw, o.away]) : null) : devig([o.home, o.away]);
+  return dk ? { p: dk, src: 'espn' } : null;
+}
+
+// Ligne principale over/under : celle des bookmakers français si connue, sinon celle d'ESPN.
+function marketTotal(m) {
+  for (const b of Object.values(m.books || {})) {
+    const lines = Object.entries(b.ou || {}).filter(([, v]) => v.O && v.U);
+    if (!lines.length) continue;
+    // ligne la plus équilibrée = ligne principale
+    const [line, v] = lines.sort((x, y) => Math.abs(x[1].O - x[1].U) - Math.abs(y[1].O - y[1].U))[0];
+    return { line: Number(line), pOver: devig([v.O, v.U])[0] };
+  }
+  const o = m.odds || {};
+  if (o.total && o.over && o.under) return { line: o.total, pOver: devig([o.over, o.under])[0] };
+  return null;
+}
+
+function marketSpread(m) {
+  for (const b of Object.values(m.books || {})) {
+    const lines = Object.entries(b.hcp || {}).filter(([, v]) => v.H && v.A);
+    if (!lines.length) continue;
+    const [line, v] = lines.sort((x, y) => Math.abs(x[1].H - x[1].A) - Math.abs(y[1].H - y[1].A))[0];
+    return { line: Number(line), pHome: devig([v.H, v.A])[0] };
+  }
+  const o = m.odds || {};
+  if (o.spread != null && o.spreadHome && o.spreadAway) return { line: o.spread, pHome: devig([o.spreadHome, o.spreadAway])[0] };
+  return null;
+}
+
+// Vraie cote d'un pari chez un bookmaker, si l'API l'a fournie.
+function realOdd(b, book) {
+  if (!book) return null;
+  switch (b.type) {
+    case 'ml': case 'win': return book.ml?.[b.side] || null;
+    case 'ou': return book.ou?.[b.line]?.[b.side] || null;
+    case 'hcp': return b.side === 'H' ? book.hcp?.[b.line]?.H || null : book.hcp?.[-b.line]?.A || null;
+    default: return null;
+  }
 }
 
 // ---------- Lecture des bilans ----------
@@ -136,149 +222,179 @@ function teamStrength(team, sport, side) {
 }
 
 // ---------- Construction des paris ----------
-function bet(type, side, line, label, p, book) {
-  const fair = p > 0 ? 1 / p : null;
-  const ev = book ? p * book - 1 : null;
-  return { type, side, line, label, p, fair, book: book || null, ev };
+// p : notre estimation ; pm : probabilité du marché (sert à estimer la cote des bookmakers)
+function bet(type, side, line, label, p, pm) {
+  return { type, side, line, label, p: clamp(p, 0.005, 0.995), pm: pm == null ? null : clamp(pm, 0.005, 0.995) };
+}
+
+// Ajoute à chaque pari : cote juste, cotes Betclic/Winamax (réelles ou estimées), value.
+function priceBets(bets, m) {
+  const malus = m.src?.minor ? MINOR_LEAGUE_MALUS : 0;
+  for (const b of bets) {
+    b.fair = 1 / b.p;
+    b.odds = {};
+    for (const key of Object.keys(BOOKS)) {
+      const real = realOdd(b, m.books?.[key]);
+      if (real) b.odds[key] = { v: real, real: true };
+      else {
+        const payout = PAYOUT[key][b.type] - malus;
+        b.odds[key] = { v: Math.max(1.01, payout / (b.pm ?? b.p)), real: false };
+      }
+    }
+    const best = Object.entries(b.odds).sort((x, y) => y[1].v - x[1].v)[0];
+    b.bestBook = best[0];
+    b.bestOdd = best[1];
+    // La value n'a de sens qu'avec une vraie cote
+    b.ev = best[1].real ? b.p * best[1].v - 1 : null;
+  }
+  return bets;
 }
 
 const num = x => String(x).replace('.', ',');
 const fmtLine = l => (l > 0 ? '+' : '') + num(l);
 
-function blendTwoWay(pModel, odds) {
-  const mk = odds.home && odds.away ? devig([odds.home, odds.away]) : null;
-  return clamp(mk ? MARKET_WEIGHT * mk[0] + (1 - MARKET_WEIGHT) * pModel : pModel, 0.02, 0.98);
+function blend(model, market) {
+  return market ? model.map((p, i) => MARKET_WEIGHT * market[i] + (1 - MARKET_WEIGHT) * p) : model;
+}
+
+// Effet des compositions : buts attendus corrigés selon les absents de chaque équipe.
+function lineupFactors(m) {
+  const l = m.lineup;
+  if (!l?.home || !l?.away) return null;
+  return {
+    h: (1 - l.home.att) * (1 + l.away.def),
+    a: (1 - l.away.att) * (1 + l.home.def),
+  };
 }
 
 function soccerMarkets(m, pModel2, data) {
   const H = m.home.short, A = m.away.short;
-  const odds = m.odds || {};
   // 1N2 du modèle : nul plus probable quand les équipes sont proches
   const pDraw = 0.27 * (1 - Math.abs(pModel2 - 0.5) * 1.3);
-  let p1x2 = [pModel2 * (1 - pDraw), pDraw, (1 - pModel2) * (1 - pDraw)];
-  const mk = odds.home && odds.draw && odds.away ? devig([odds.home, odds.draw, odds.away]) : null;
-  if (mk) p1x2 = p1x2.map((p, i) => MARKET_WEIGHT * mk[i] + (1 - MARKET_WEIGHT) * p);
-  const [pH, pD, pA] = p1x2;
+  const mk = marketMoneyline(m, true);
+  let [pH, pD, pA] = blend([pModel2 * (1 - pDraw), pDraw, (1 - pModel2) * (1 - pDraw)], mk?.p);
 
-  // Nombre de buts attendu : déduit de la ligne over/under du bookmaker, sinon ~2,65
-  const ou = odds.total && odds.over && odds.under ? devig([odds.over, odds.under]) : null;
-  let total = 2.65;
-  if (ou) {
-    let lo = 0.8, hi = 5.5;
-    for (let i = 0; i < 40; i++) {
-      const mid = (lo + hi) / 2;
-      if (gridStats(scoreGrid(mid / 2, mid / 2)).over(odds.total) < ou[0]) lo = mid; else hi = mid;
-    }
-    total = (lo + hi) / 2;
+  const mt = marketTotal(m);
+  const total = mt ? totalFromLine(mt.line, mt.pOver) : 2.65;
+  let g = fitGoals(total, pH - pA);
+  // Grille « marché seul » pour estimer les cotes des bookmakers sur les autres lignes
+  const gm = mk ? fitGoals(total, mk.p[0] - mk.p[2]) : null;
+
+  const f = lineupFactors(m);
+  if (f) {
+    const adj = goals(g.lh * f.h, g.la * f.a);
+    // On décale le 1N2 de l'effet des absents, puis on renormalise
+    const shifted = [pH + adj.home - g.home, pD + adj.draw - g.draw, pA + adj.away - g.away].map(x => Math.max(0.01, x));
+    const s = shifted.reduce((a, b) => a + b, 0);
+    [pH, pD, pA] = shifted.map(x => x / s);
+    g = adj;
   }
-  // Écart de buts (supériorité) calé pour retrouver P(dom) - P(ext)
-  let lo = -3, hi = 3;
-  for (let i = 0; i < 40; i++) {
-    const s = (lo + hi) / 2;
-    const g = gridStats(scoreGrid(Math.max(0.05, (total + s) / 2), Math.max(0.05, (total - s) / 2)));
-    if (g.home - g.away < pH - pA) lo = s; else hi = s;
-  }
-  const sup = (lo + hi) / 2;
-  const lh = Math.max(0.05, (total + sup) / 2), la = Math.max(0.05, (total - sup) / 2);
-  const g = gridStats(scoreGrid(lh, la));
-  data.xg = [lh, la];
+  data.xg = [g.lh, g.la];
   data.likelyScore = `${g.best.h}-${g.best.a}`;
+  data.marketSrc = mk?.src;
 
+  const [mH, mD, mA] = mk ? mk.p : [null, null, null];
   const bets = [
-    bet('ml', 'H', null, `Victoire ${H}`, pH, odds.home),
-    bet('ml', 'D', null, 'Match nul', pD, odds.draw),
-    bet('ml', 'A', null, `Victoire ${A}`, pA, odds.away),
-    bet('dc', '1X', null, `${H} ou nul (1X)`, pH + pD),
-    bet('dc', 'X2', null, `${A} ou nul (X2)`, pA + pD),
-    bet('dc', '12', null, 'Pas de match nul (12)', pH + pA),
-    bet('dnb', 'H', null, `${H} remboursé si nul`, pH / (pH + pA)),
-    bet('dnb', 'A', null, `${A} remboursé si nul`, pA / (pH + pA)),
-    bet('btts', 'Y', null, 'Les deux équipes marquent', g.btts),
-    bet('btts', 'N', null, 'Au moins une équipe ne marque pas', 1 - g.btts),
+    bet('ml', 'H', null, `Victoire ${H}`, pH, mH),
+    bet('ml', 'D', null, 'Match nul', pD, mD),
+    bet('ml', 'A', null, `Victoire ${A}`, pA, mA),
+    bet('dc', '1X', null, `${H} ou nul (1N)`, pH + pD, mk && mH + mD),
+    bet('dc', 'X2', null, `${A} ou nul (N2)`, pA + pD, mk && mA + mD),
+    bet('dc', '12', null, `${H} ou ${A} (12)`, pH + pA, mk && mH + mA),
+    bet('dnb', 'H', null, `${H} (remboursé si nul)`, pH / (pH + pA), mk && mH / (mH + mA)),
+    bet('dnb', 'A', null, `${A} (remboursé si nul)`, pA / (pH + pA), mk && mA / (mH + mA)),
+    bet('btts', 'Y', null, 'Les deux équipes marquent : oui', g.btts, gm?.btts),
+    bet('btts', 'N', null, 'Les deux équipes marquent : non', 1 - g.btts, gm && 1 - gm.btts),
   ];
   for (const line of [1.5, 2.5, 3.5]) {
-    const book = odds.total === line && ou ? [odds.over, odds.under] : [null, null];
-    bets.push(bet('ou', 'O', line, `Plus de ${num(line)} buts`, g.over(line), book[0]));
-    bets.push(bet('ou', 'U', line, `Moins de ${num(line)} buts`, 1 - g.over(line), book[1]));
+    const pmOver = mt && mt.line === line ? mt.pOver : gm ? gm.over(line) : null;
+    bets.push(bet('ou', 'O', line, `Plus de ${num(line)} buts`, g.over(line), pmOver));
+    bets.push(bet('ou', 'U', line, `Moins de ${num(line)} buts`, 1 - g.over(line), pmOver == null ? null : 1 - pmOver));
   }
   return bets;
 }
 
 function pointsMarkets(m, pModel2, cfg, data) {
   const H = m.home.short, A = m.away.short;
-  const odds = m.odds || {};
-  const pH = blendTwoWay(pModel2, odds);
+  const mk = marketMoneyline(m, false);
+  const pH = clamp(blend([pModel2], mk && [mk.p[0]])[0], 0.02, 0.98);
   const sd = m.src.sd ?? cfg.sd;
   const mu = sd * normInv(pH); // écart de points attendu en faveur du domicile
-  // Total attendu : moyennes des équipes ou du championnat, recalé sur la ligne du bookmaker
+  // Total attendu : moyennes des équipes ou du championnat, recalé sur la ligne du marché
   let total = m.src.total ?? cfg.total;
   if (m.home.avgPts && m.away.avgPts) total = m.home.avgPts + m.away.avgPts;
-  if (odds.total) total = 0.6 * odds.total + 0.4 * total;
+  const mt = marketTotal(m);
+  if (mt) total = 0.6 * (mt.line + cfg.tsd * normInv(mt.pOver)) + 0.4 * total;
   const tsd = m.src.tsd ?? cfg.tsd;
   data.margin = mu;
   data.total = total;
+  data.marketSrc = mk?.src;
 
   const bets = [
-    bet('ml', 'H', null, `Victoire ${H}`, pH, odds.home),
-    bet('ml', 'A', null, `Victoire ${A}`, 1 - pH, odds.away),
+    bet('ml', 'H', null, `Victoire ${H}`, pH, mk?.p[0]),
+    bet('ml', 'A', null, `Victoire ${A}`, 1 - pH, mk?.p[1]),
   ];
-  // Handicap : ligne du bookmaker, sinon écart attendu arrondi au demi-point
-  const line = odds.spread ?? (Math.round(-mu) + (mu >= 0 ? 0.5 : -0.5));
+  // Handicap : ligne du marché, sinon écart attendu arrondi au demi-point
+  const ms = marketSpread(m);
+  const line = ms ? ms.line : Math.round(-mu) + (mu >= 0 ? 0.5 : -0.5);
   const pCover = clamp(normCdf((mu + line) / sd), 0.01, 0.99);
-  const hasSpread = odds.spread != null;
-  bets.push(bet('hcp', 'H', line, `${H} ${fmtLine(line)} (handicap)`, pCover, hasSpread ? odds.spreadHome : null));
-  bets.push(bet('hcp', 'A', -line, `${A} ${fmtLine(-line)} (handicap)`, 1 - pCover, hasSpread ? odds.spreadAway : null));
-  const tLine = odds.total ?? Math.round(total) + 0.5;
+  bets.push(bet('hcp', 'H', line, `${H} ${fmtLine(line)} (handicap)`, pCover, ms?.pHome));
+  bets.push(bet('hcp', 'A', -line, `${A} ${fmtLine(-line)} (handicap)`, 1 - pCover, ms && 1 - ms.pHome));
+  const tLine = mt ? mt.line : Math.round(total) + 0.5;
   const pOver = clamp(1 - normCdf((tLine - total) / tsd), 0.02, 0.98);
   const unit = m.sport === 'hockey' ? 'buts' : m.sport === 'baseball' ? 'points (runs)' : 'points';
-  bets.push(bet('ou', 'O', tLine, `Plus de ${num(tLine)} ${unit}`, pOver, odds.total ? odds.over : null));
-  bets.push(bet('ou', 'U', tLine, `Moins de ${num(tLine)} ${unit}`, 1 - pOver, odds.total ? odds.under : null));
+  bets.push(bet('ou', 'O', tLine, `Plus de ${num(tLine)} ${unit}`, pOver, mt?.pOver));
+  bets.push(bet('ou', 'U', tLine, `Moins de ${num(tLine)} ${unit}`, 1 - pOver, mt && 1 - mt.pOver));
   return bets;
 }
 
 function tennisMarkets(m, data) {
   const H = m.home.short, A = m.away.short;
-  const odds = m.odds || {};
-  const pH = clamp(blendTwoWay(sigmoid(0.95 * Math.log(m.home.rankPts / m.away.rankPts)), odds), 0.03, 0.97);
+  const mk = marketMoneyline(m, false);
+  const model = sigmoid(0.95 * Math.log(m.home.rankPts / m.away.rankPts));
+  const pH = clamp(blend([model], mk && [mk.p[0]])[0], 0.03, 0.97);
   // Probabilité de gagner un set q, telle que P(match) = q²(3-2q) au meilleur des 3 sets
-  let lo = 0, hi = 1;
-  for (let i = 0; i < 40; i++) {
-    const q = (lo + hi) / 2;
-    if (q * q * (3 - 2 * q) < pH) lo = q; else hi = q;
-  }
-  const q = (lo + hi) / 2;
-  const p3 = 2 * q * (1 - q);
+  const setProb = p => {
+    let lo = 0, hi = 1;
+    for (let i = 0; i < 40; i++) {
+      const q = (lo + hi) / 2;
+      if (q * q * (3 - 2 * q) < p) lo = q; else hi = q;
+    }
+    return (lo + hi) / 2;
+  };
+  const q = setProb(pH);
+  const qm = mk ? setProb(mk.p[0]) : null;
   data.setProb = q;
+  data.marketSrc = mk?.src;
+  const p3 = 2 * q * (1 - q);
+  const pm3 = qm == null ? null : 2 * qm * (1 - qm);
   return [
-    bet('win', 'H', null, `Victoire ${H}`, pH, odds.home),
-    bet('win', 'A', null, `Victoire ${A}`, 1 - pH, odds.away),
-    bet('sets', 'Y', null, 'Match en 3 sets', p3),
-    bet('sets', 'N', null, 'Match en 2 sets', 1 - p3),
-    bet('set1', 'H', null, `${H} gagne au moins un set`, 1 - (1 - q) * (1 - q)),
-    bet('set1', 'A', null, `${A} gagne au moins un set`, 1 - q * q),
+    bet('win', 'H', null, `Victoire ${H}`, pH, mk?.p[0]),
+    bet('win', 'A', null, `Victoire ${A}`, 1 - pH, mk?.p[1]),
+    bet('sets', 'Y', null, 'Nombre de sets : 3', p3, pm3),
+    bet('sets', 'N', null, 'Nombre de sets : 2', 1 - p3, pm3 == null ? null : 1 - pm3),
   ];
 }
 
-// Choix du « meilleur pari » : forte probabilité, mais une cote qui vaut le coup (≥ 1,25)
+// Choix du « meilleur pari » : une cote Betclic/Winamax d'au moins 1,30, une bonne probabilité,
+// et surtout la meilleure espérance de gain à la cote réellement proposée (réelle ou estimée).
+const MIN_BOOK_ODD = 1.3;
 function pickBest(bets) {
   const score = b => {
-    let s = b.p;
-    if (b.fair < 1.25) s -= (1.25 - b.fair) * 1.5;
-    if (b.fair > 2.6) s -= 0.15;
-    if (b.ev != null) s += clamp(b.ev, -0.1, 0.15);
-    if (b.type === 'dnb') s -= 0.04; // moins répandu chez les bookmakers
-    return s;
+    const ev = b.p * b.bestOdd.v - 1;
+    return 0.6 * b.p + 1.5 * clamp(ev, -0.2, 0.2) - (b.bestOdd.v > 2.8 ? 0.1 : 0);
   };
-  return [...bets].filter(b => b.p >= 0.5).sort((a, b) => score(b) - score(a))[0]
+  return [...bets].filter(b => b.p >= 0.45 && b.bestOdd.v >= MIN_BOOK_ODD).sort((a, b) => score(b) - score(a))[0]
     || [...bets].sort((a, b) => b.p - a.p)[0];
 }
 
 // Fiabilité 1 à 3 : quantité de données disponibles
-function reliability(m, gp) {
+function reliability(m, gp, marketSrc) {
   let r = 0;
-  if (m.odds && (m.odds.home || m.odds.total)) r += 2;
+  if (marketSrc) r += 2;
   if (gp >= 5) r += 1;
   if (m.home.form || m.home.rank) r += 0.5;
+  if (m.lineup?.status === 'official') r += 0.5;
   return r >= 3 ? 3 : r >= 1.5 ? 2 : 1;
 }
 
@@ -298,20 +414,43 @@ function analyze(m) {
     const pModel2 = sigmoid(logit(clamp(h.s, 0.05, 0.95)) - logit(clamp(a.s, 0.05, 0.95)) + adv);
     if (m.sport === 'soccer') bets = soccerMarkets(m, pModel2, data);
     else if (m.sport === 'mma') {
-      const pH = blendTwoWay(pModel2, m.odds || {});
+      const mk = marketMoneyline(m, false);
+      const pH = clamp(blend([pModel2], mk && [mk.p[0]])[0], 0.02, 0.98);
+      data.marketSrc = mk?.src;
       bets = [
-        bet('win', 'H', null, `Victoire ${m.home.short}`, pH, m.odds?.home),
-        bet('win', 'A', null, `Victoire ${m.away.short}`, 1 - pH, m.odds?.away),
+        bet('win', 'H', null, `Victoire ${m.home.short}`, pH, mk?.p[0]),
+        bet('win', 'A', null, `Victoire ${m.away.short}`, 1 - pH, mk?.p[1]),
       ];
     } else bets = pointsMarkets(m, pModel2, cfg, data);
   }
+  priceBets(bets, m);
   const best = pickBest(bets);
-  return { bets, best, reliability: reliability(m, gp), text: explain(m, best, data) };
+  return { bets, best, reliability: reliability(m, gp, data.marketSrc), text: explain(m, best, data) };
 }
 
 // ---------- Analyse rédigée ----------
 const pct = p => `${Math.round(p * 100)} %`;
+const odd = x => x.toFixed(2).replace('.', ',');
 const formFr = f => [...(f || '')].map(c => ({ W: 'V', L: 'D', D: 'N', T: 'N' }[c.toUpperCase()] || c)).join('');
+
+function lineupText(m) {
+  const l = m.lineup;
+  if (!l?.home) return [];
+  const out = [];
+  const kind = l.status === 'official' ? 'Compo officielle' : 'Compo probable';
+  for (const [side, t] of [['home', m.home], ['away', m.away]]) {
+    const x = l[side];
+    if (!x.absent.length) out.push(`${kind} ${t.short} : aucun titulaire habituel absent.`);
+    else {
+      const names = x.absent.slice(0, 4).map(p => p.g || p.a ? `${p.name} (${p.g} but${p.g > 1 ? 's' : ''}, ${p.a} passe${p.a > 1 ? 's' : ''})` : p.name);
+      out.push(`${kind} ${t.short} : ${x.absent.length} titulaire${x.absent.length > 1 ? 's' : ''} habituel${x.absent.length > 1 ? 's' : ''} absent${x.absent.length > 1 ? 's' : ''} (${names.join(', ')}${x.absent.length > 4 ? '…' : ''}).`);
+    }
+  }
+  const f = lineupFactors(m);
+  const eff = side => Math.round((f[side] - 1) * 100);
+  if (f && (eff('h') || eff('a'))) out.push(`Effet des compos sur les buts attendus : ${m.home.short} ${eff('h') > 0 ? '+' : ''}${eff('h')} %, ${m.away.short} ${eff('a') > 0 ? '+' : ''}${eff('a')} %.`);
+  return out;
+}
 
 function explain(m, best, data) {
   const out = [];
@@ -332,12 +471,19 @@ function explain(m, best, data) {
     };
     [desc(m.home, 'home'), desc(m.away, 'away')].filter(Boolean).forEach(s => out.push(s));
     if (m.neutral) out.push('Terrain neutre : pas d’avantage du terrain.');
+    out.push(...lineupText(m));
     if (data.xg) out.push(`Buts attendus : ${data.xg[0].toFixed(2)} pour ${m.home.short}, ${data.xg[1].toFixed(2)} pour ${m.away.short}. Score le plus probable : ${data.likelyScore}.`);
     if (data.margin != null) out.push(`Écart attendu : ${Math.abs(data.margin).toFixed(1)} en faveur de ${data.margin >= 0 ? m.home.short : m.away.short}, total attendu ≈ ${data.total.toFixed(1)}.`);
   }
-  if (m.odds && m.odds.home) out.push(`Les cotes ${m.odds.provider || 'du marché'} comptent pour ${Math.round(MARKET_WEIGHT * 100)} % de l’estimation.`);
+  if (data.marketSrc === 'books') out.push(`Les vraies cotes Betclic/Winamax comptent pour ${Math.round(MARKET_WEIGHT * 100)} % de l’estimation.`);
+  else if (data.marketSrc === 'espn') out.push(`Les cotes du marché international comptent pour ${Math.round(MARKET_WEIGHT * 100)} % de l’estimation. Les cotes Betclic/Winamax affichées sont estimées à partir de leurs marges habituelles.`);
   else out.push('Aucune cote disponible : estimation purement statistique, à prendre avec plus de prudence.');
-  if (best) out.push(`Notre choix : « ${best.label} » (${pct(best.p)}). À jouer seulement si votre bookmaker propose une cote supérieure à ${best.fair.toFixed(2).replace('.', ',')}.`);
+  if (best) {
+    const o = best.bestOdd;
+    out.push(`Notre choix : « ${best.label} » (${pct(best.p)}). ${o.real
+      ? `Meilleure cote : ${odd(o.v)} chez ${BOOKS[best.bestBook]}${best.ev > 0 ? ', supérieure à notre cote juste : pari « value »' : ''}.`
+      : `Cote attendue ≈ ${odd(o.v)} chez ${BOOKS[best.bestBook]}.`} À jouer seulement si la cote proposée dépasse ${odd(best.fair)}.`);
+  }
   return out;
 }
 
@@ -357,10 +503,9 @@ function settle(b, res) {
       return d === 0 ? null : d > 0;
     }
     case 'sets': return sets ? (sets === 3) === (b.side === 'Y') : null;
-    case 'set1': return res.setsWon ? res.setsWon[b.side] > 0 : null;
     default: return null;
   }
 }
 
-window.Engine = { analyze, settle, americanToDecimal, SPORT_CFG };
+window.Engine = { analyze, settle, americanToDecimal, SPORT_CFG, BOOKS };
 })();
