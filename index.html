@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pronos du Jour</title>
+<meta name="description" content="Tous les matchs du jour et les meilleurs paris estimés, tous sports confondus.">
+<meta name="theme-color" content="#0f1720" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#eef1f4" media="(prefers-color-scheme: light)">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="bar">
+  <div class="bar-inner">
+    <div class="brand">
+      <h1>Pronos <em>du Jour</em></h1>
+      <p id="date" class="date"></p>
+    </div>
+    <button id="refresh" class="refresh" type="button">
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span id="refresh-label">Actualiser</span>
+    </button>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="row">
+    <div class="seg" role="group" aria-label="Journée">
+      <button type="button" data-day="0">Aujourd'hui</button>
+      <button type="button" data-day="1">Demain</button>
+    </div>
+    <p id="meta" class="meta"></p>
+  </div>
+
+  <div id="stale" class="stale" hidden>
+    <span>Ces données datent d'un autre jour.</span>
+    <button id="stale-refresh" type="button">Actualiser maintenant</button>
+  </div>
+
+  <div id="record" class="record" hidden></div>
+
+  <section id="top" class="top" hidden aria-labelledby="top-title">
+    <h2 id="top-title">Les meilleurs paris du jour</h2>
+    <ol id="top-list" class="tickets"></ol>
+    <div id="combo" class="combo" hidden></div>
+  </section>
+
+  <section class="filters" aria-label="Filtres">
+    <div id="sports" class="chips"></div>
+    <div class="row">
+      <div class="seg" role="group" aria-label="Statut des matchs">
+        <button type="button" data-status="upcoming">À venir</button>
+        <button type="button" data-status="live">En cours</button>
+        <button type="button" data-status="done">Terminés</button>
+        <button type="button" data-status="all">Tout</button>
+      </div>
+      <input id="search" class="search" type="search" placeholder="Équipe, joueur, ligue…" aria-label="Rechercher">
+    </div>
+  </section>
+
+  <div id="empty" class="empty" hidden></div>
+  <div id="list"></div>
+
+  <footer class="foot">
+    <p><b>18+ · Jouer comporte des risques : endettement, isolement, dépendance.</b> Pour être aidé, appelez le 09 74 75 13 13 (appel non surtaxé).</p>
+    <p>Les pronostics sont des estimations statistiques calculées à partir des bilans, de la forme et, quand elles sont publiées, des cotes du marché. Aucun gain n'est garanti. Données : ESPN.</p>
+  </footer>
+</main>
+
+<div id="toast" class="toast" role="status" hidden></div>
+
+<script src="engine.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
