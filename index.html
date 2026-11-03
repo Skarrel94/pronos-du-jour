@@ -27,7 +27,7 @@
     </button>
     <button id="refresh" class="refresh" type="button">
       <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      <span id="refresh-label">Actualiser</span>
+      <span id="refresh-label">Mettre à jour</span>
     </button>
   </div>
 </header>
@@ -41,9 +41,14 @@
     <p id="meta" class="meta"></p>
   </div>
 
+  <div class="row">
+    <button id="odds-btn" class="odds-btn" type="button" hidden>Charger les vraies cotes</button>
+    <p class="meta">« Mettre à jour » et les scores en direct (chaque minute, app ouverte) sont gratuits. Seules les vraies cotes utilisent des crédits.</p>
+  </div>
+
   <div id="stale" class="stale" hidden>
     <span>Ces données datent d'un autre jour.</span>
-    <button id="stale-refresh" type="button">Actualiser maintenant</button>
+    <button id="stale-refresh" type="button">Mettre à jour (gratuit)</button>
   </div>
 
   <div id="odds-hint" class="stale" hidden>

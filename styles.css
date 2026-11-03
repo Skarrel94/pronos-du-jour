@@ -235,6 +235,26 @@ td.value { color: var(--ok); font-weight: 600; background: color-mix(in srgb, va
   background: var(--surface-2); border-radius: 8px; padding: 10px 12px; font-size: 13.5px;
 }
 .lineup p { margin: 0; flex: 1 1 220px; min-width: 0; }
+.lineup small { color: var(--ink-2); }
+.effect { border: 1px dashed var(--line); border-radius: 8px; padding: 10px 12px; font-size: 13.5px; display: flex; flex-direction: column; gap: 6px; }
+.effect p { margin: 0; }
+.effect-title { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-2); }
+.effect ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 2px; }
+.delta { font: 600 12px var(--font-num); color: var(--ink-2); }
+.delta.up { color: var(--ok); }
+.delta.down { color: var(--ko); }
+.odds-btn {
+  border: 1px solid var(--accent-text); background: transparent; color: var(--accent-text);
+  border-radius: 999px; padding: 7px 14px; font-weight: 600; font-size: 13.5px; min-height: 38px;
+}
+.odds-btn:disabled { opacity: .7; cursor: progress; }
+.live-dot { color: var(--ko); font-weight: 600; }
+.live-dot::before {
+  content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--ko);
+  margin-right: 5px; vertical-align: 1px; animation: pulse 1.6s ease-in-out infinite;
+}
+@keyframes pulse { 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { .live-dot::before { animation: none; } }
 .ghost {
   border: 1px solid var(--line); background: var(--surface); color: var(--ink);
   border-radius: 999px; padding: 7px 14px; font-weight: 500; font-size: 13.5px; min-height: 36px;
@@ -270,13 +290,16 @@ td.value { color: var(--ok); font-weight: 600; background: color-mix(in srgb, va
 .toast {
   position: fixed; left: 50%; transform: translateX(-50%);
   bottom: calc(18px + env(safe-area-inset-bottom, 0px)); z-index: 10;
-  background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 999px; font-size: 14px;
-  max-width: calc(100% - 32px); box-shadow: 0 6px 20px rgb(0 0 0 / .25);
+  background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 14px; font-size: 14px;
+  width: max-content; max-width: calc(100% - 32px); text-align: center; text-wrap: balance;
+  box-shadow: 0 6px 20px rgb(0 0 0 / .25);
 }
 
 @media (max-width: 420px) {
-  .brand h1 { font-size: 24px; }
-  .refresh { padding: 10px 13px; }
+  .bar-inner { gap: 8px; }
+  .brand h1 { font-size: 21px; white-space: nowrap; }
+  .refresh { padding: 10px 12px; font-size: 14px; gap: 6px; }
+  .icon-btn { width: 40px; height: 40px; }
   .match-head { grid-template-columns: 52px 1fr auto; }
   .pick, .verdict { margin-left: 12px; }
 }

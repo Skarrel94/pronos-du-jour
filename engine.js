@@ -6,14 +6,15 @@
 // le meilleur estimateur disponible), corrigée par les compositions d'équipe au football,
 // puis déclinée uniquement en paris proposés par Betclic et Winamax.
 
+// homePts : avantage du terrain en points pour le modèle attaque/défense
 const SPORT_CFG = {
   soccer:     { label: 'Football',        home: 0.32, k: 6 },
-  basketball: { label: 'Basket',          home: 0.25, k: 8,  sd: 12,   total: 226, tsd: 18 },
-  football:   { label: 'Football US',     home: 0.18, k: 6,  sd: 13.5, total: 45,  tsd: 13 },
-  hockey:     { label: 'Hockey',          home: 0.15, k: 10, sd: 2.4,  total: 6,   tsd: 2.3 },
-  baseball:   { label: 'Baseball',        home: 0.12, k: 20, sd: 4.2,  total: 8.5, tsd: 4.3 },
-  rugby:      { label: 'Rugby',           home: 0.45, k: 6,  sd: 14,   total: 47,  tsd: 15 },
-  afl:        { label: 'Foot australien', home: 0.30, k: 6,  sd: 30,   total: 165, tsd: 28 },
+  basketball: { label: 'Basket',          home: 0.25, k: 8,  sd: 12,   total: 226, tsd: 18, homePts: 2.5 },
+  football:   { label: 'Football US',     home: 0.18, k: 6,  sd: 13.5, total: 45,  tsd: 13, homePts: 1.5 },
+  hockey:     { label: 'Hockey',          home: 0.15, k: 10, sd: 2.4,  total: 6,   tsd: 2.3, homePts: 0.2 },
+  baseball:   { label: 'Baseball',        home: 0.12, k: 20, sd: 4.2,  total: 8.5, tsd: 4.3, homePts: 0.2 },
+  rugby:      { label: 'Rugby',           home: 0.45, k: 6,  sd: 14,   total: 47,  tsd: 15, homePts: 4 },
+  afl:        { label: 'Foot australien', home: 0.30, k: 6,  sd: 30,   total: 165, tsd: 28, homePts: 6 },
   tennis:     { label: 'Tennis',          home: 0 },
   mma:        { label: 'MMA',             home: 0 },
 };
@@ -258,24 +259,78 @@ function blend(model, market) {
 }
 
 // Effet des compositions : buts attendus corrigés selon les absents de chaque équipe.
+// Une compo probable est moins sûre qu'une compo officielle : son effet est réduit.
 function lineupFactors(m) {
   const l = m.lineup;
   if (!l?.home || !l?.away) return null;
+  const w = l.status === 'official' ? 1 : 0.6;
   return {
-    h: (1 - l.home.att) * (1 + l.away.def),
-    a: (1 - l.away.att) * (1 + l.home.def),
+    h: (1 - w * l.home.att) * (1 + w * l.away.def),
+    a: (1 - w * l.away.att) * (1 + w * l.home.def),
   };
+}
+
+// ---------- Données avancées ----------
+// Football : force d'attaque et de défense (buts marqués / encaissés par match, comparés à la
+// moyenne du championnat), mêlée aux 5 derniers matchs. Méthode classique des modèles de Poisson.
+// Le poids w grandit avec le nombre de matchs joués : rien sous 5 matchs, plein poids à 10.
+function soccerStats(m) {
+  const s = m.adv;
+  const gpMin = Math.min(s?.home?.gp || 0, s?.away?.gp || 0);
+  if (!s?.avg || gpMin < 5) return null;
+  const w = Math.min(1, gpMin / 10);
+  const avg = w * s.avg + (1 - w) * 1.35; // moyenne du championnat ramenée vers ~1,35 but/équipe
+  const k = 4; // lissage vers la moyenne en début de saison
+  const ratio = (goalsN, gp) => ((goalsN / gp / avg) * gp + k) / (gp + k);
+  const side = (t, l5) => {
+    let att = ratio(t.gf, t.gp), def = ratio(t.ga, t.gp);
+    if (l5?.n >= 3) {
+      att = 0.75 * att + 0.25 * ratio(l5.gf, l5.n);
+      def = 0.75 * def + 0.25 * ratio(l5.ga, l5.n);
+    }
+    return { att, def };
+  };
+  const h = side(s.home, m.deep?.last5?.home), a = side(s.away, m.deep?.last5?.away);
+  const hf = m.neutral ? 1 : 1.12; // les équipes marquent ~12 % de plus à domicile
+  return { h, a, w, avg, lh: avg * hf * h.att * a.def, la: (avg / hf) * a.att * h.def };
+}
+
+// Confrontations directes : part des points pris par l'équipe à domicile (victoire 1, nul 0,5).
+function h2hShift(m) {
+  const h = m.deep?.h2h;
+  if (!h || h.n < 3) return 0;
+  return clamp((h.homeShare - 0.5) * 0.08, -0.04, 0.04);
+}
+
+// Blessés (basket, NFL, hockey…) : chaque absent fait baisser les chances de son équipe.
+function injuryShift(m) {
+  const inj = m.deep?.injuries;
+  if (!inj) return 0;
+  const weight = list => (list || []).reduce((s, p) => s + (/out|reserve/i.test(p.status) ? 1 : /doubt/i.test(p.status) ? 0.5 : 0), 0);
+  return clamp(-0.06 * weight(inj.home), -0.3, 0) - clamp(-0.06 * weight(inj.away), -0.3, 0);
 }
 
 function soccerMarkets(m, pModel2, data) {
   const H = m.home.short, A = m.away.short;
   // 1N2 du modèle : nul plus probable quand les équipes sont proches
   const pDraw = 0.27 * (1 - Math.abs(pModel2 - 0.5) * 1.3);
+  let model = [pModel2 * (1 - pDraw), pDraw, (1 - pModel2) * (1 - pDraw)];
+  // Modèle attaque/défense (Poisson) : jusqu'à 60 % du modèle statistique, selon le nombre de matchs joués
+  const st = soccerStats(m);
+  if (st) {
+    const gs = goals(st.lh, st.la);
+    const w = 0.6 * st.w;
+    model = model.map((p, i) => (1 - w) * p + w * [gs.home, gs.draw, gs.away][i]);
+    data.stats = st;
+  }
+  const hs = h2hShift(m);
+  model = [model[0] + hs, model[1], model[2] - hs].map(x => Math.max(0.02, x));
   const mk = marketMoneyline(m, true);
-  let [pH, pD, pA] = blend([pModel2 * (1 - pDraw), pDraw, (1 - pModel2) * (1 - pDraw)], mk?.p);
+  let [pH, pD, pA] = blend(model, mk?.p);
 
   const mt = marketTotal(m);
-  const total = mt ? totalFromLine(mt.line, mt.pOver) : 2.65;
+  const modelTotal = st ? st.w * (st.lh + st.la) + (1 - st.w) * 2.65 : 2.65;
+  const total = mt ? 0.7 * totalFromLine(mt.line, mt.pOver) + 0.3 * modelTotal : modelTotal;
   let g = fitGoals(total, pH - pA);
   // Grille « marché seul » pour estimer les cotes des bookmakers sur les autres lignes
   const gm = mk ? fitGoals(total, mk.p[0] - mk.p[2]) : null;
@@ -317,12 +372,26 @@ function soccerMarkets(m, pModel2, data) {
 function pointsMarkets(m, pModel2, cfg, data) {
   const H = m.home.short, A = m.away.short;
   const mk = marketMoneyline(m, false);
-  const pH = clamp(blend([pModel2], mk && [mk.p[0]])[0], 0.02, 0.98);
   const sd = m.src.sd ?? cfg.sd;
-  const mu = sd * normInv(pH); // écart de points attendu en faveur du domicile
   // Total attendu : moyennes des équipes ou du championnat, recalé sur la ligne du marché
   let total = m.src.total ?? cfg.total;
   if (m.home.avgPts && m.away.avgPts) total = m.home.avgPts + m.away.avgPts;
+  // Attaque/défense : points marqués par l'un et encaissés par l'autre (classement)
+  const s = m.adv;
+  const gpMin = Math.min(s?.home?.gp || 0, s?.away?.gp || 0);
+  if (gpMin >= 5) {
+    const w = Math.min(1, gpMin / 10); // plein poids à partir de 10 matchs
+    const hp = m.neutral ? 0 : (cfg.homePts || 0) / 2;
+    const expH = (s.home.gf / s.home.gp + s.away.ga / s.away.gp) / 2 + hp;
+    const expA = (s.away.gf / s.away.gp + s.home.ga / s.home.gp) / 2 - hp;
+    pModel2 = (1 - 0.5 * w) * pModel2 + 0.5 * w * normCdf((expH - expA) / sd);
+    total = w * (expH + expA) + (1 - w) * total;
+    data.stats = { expH, expA };
+  }
+  const inj = injuryShift(m);
+  const pH = clamp(sigmoid(logit(clamp(blend([pModel2], mk && [mk.p[0]])[0], 0.02, 0.98)) + inj), 0.02, 0.98);
+  data.injury = inj;
+  const mu = sd * normInv(pH); // écart de points attendu en faveur du domicile
   const mt = marketTotal(m);
   if (mt) total = 0.6 * (mt.line + cfg.tsd * normInv(mt.pOver)) + 0.4 * total;
   const tsd = m.src.tsd ?? cfg.tsd;
@@ -395,6 +464,7 @@ function reliability(m, gp, marketSrc) {
   if (gp >= 5) r += 1;
   if (m.home.form || m.home.rank) r += 0.5;
   if (m.lineup?.status === 'official') r += 0.5;
+  if (m.adv?.home?.gp >= 3) r += 0.5;
   return r >= 3 ? 3 : r >= 1.5 ? 2 : 1;
 }
 
@@ -452,6 +522,35 @@ function lineupText(m) {
   return out;
 }
 
+function advancedText(m, data) {
+  const out = [];
+  const s = m.adv;
+  const per = (x, gp) => (x / gp).toFixed(m.sport === 'soccer' || m.sport === 'hockey' ? 2 : 1).replace('.', ',');
+  if (s?.home?.gp && s?.away?.gp) {
+    const unit = m.sport === 'soccer' || m.sport === 'hockey' ? 'buts' : 'pts';
+    for (const [t, x] of [[m.home, s.home], [m.away, s.away]]) {
+      out.push(`${t.short} : ${per(x.gf, x.gp)} ${unit} marqués et ${per(x.ga, x.gp)} encaissés par match (${x.gp} matchs${x.rank ? `, ${x.rank}e du classement` : ''}).`);
+    }
+    if (data.stats?.h) {
+      const f = v => `${v >= 1 ? '+' : ''}${Math.round((v - 1) * 100)} %`;
+      out.push(`Par rapport à la moyenne du championnat (${s.avg.toFixed(2).replace('.', ',')} but par équipe et par match${data.stats.w < 1 ? `, stats comptées à ${Math.round(data.stats.w * 100)} % : saison encore courte` : ''}) : ${m.home.short} marque ${f(data.stats.h.att)} et encaisse ${f(data.stats.h.def)} ; ${m.away.short} marque ${f(data.stats.a.att)} et encaisse ${f(data.stats.a.def)}.`);
+    }
+  }
+  const l5 = m.deep?.last5;
+  for (const [t, x] of [[m.home, l5?.home], [m.away, l5?.away]]) {
+    if (x?.n) out.push(`${x.n} derniers matchs ${t.short} : ${formFr(x.form)}, ${x.gf} buts marqués, ${x.ga} encaissés.`);
+  }
+  const h = m.deep?.h2h;
+  if (h?.n) out.push(`Confrontations directes (${h.n === 1 ? 'la dernière' : `les ${h.n} dernières`}) : ${m.home.short} a pris ${Math.round(h.homeShare * 100)} % des points${h.n >= 3 ? ' (pris en compte)' : ' (trop peu pour compter)'}.`);
+  const inj = m.deep?.injuries;
+  if (inj && m.sport !== 'soccer') {
+    for (const [t, list] of [[m.home, inj.home], [m.away, inj.away]]) {
+      if (list?.length) out.push(`Blessés ${t.short} : ${list.slice(0, 5).map(p => `${p.name} (${p.status})`).join(', ')}${list.length > 5 ? '…' : ''}.`);
+    }
+  }
+  return out;
+}
+
 function explain(m, best, data) {
   const out = [];
   const H = m.home.name, A = m.away.name;
@@ -471,6 +570,7 @@ function explain(m, best, data) {
     };
     [desc(m.home, 'home'), desc(m.away, 'away')].filter(Boolean).forEach(s => out.push(s));
     if (m.neutral) out.push('Terrain neutre : pas d’avantage du terrain.');
+    out.push(...advancedText(m, data));
     out.push(...lineupText(m));
     if (data.xg) out.push(`Buts attendus : ${data.xg[0].toFixed(2)} pour ${m.home.short}, ${data.xg[1].toFixed(2)} pour ${m.away.short}. Score le plus probable : ${data.likelyScore}.`);
     if (data.margin != null) out.push(`Écart attendu : ${Math.abs(data.margin).toFixed(1)} en faveur de ${data.margin >= 0 ? m.home.short : m.away.short}, total attendu ≈ ${data.total.toFixed(1)}.`);

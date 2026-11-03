@@ -383,29 +383,43 @@ async function teamRoster(path, teamId) {
 }
 
 // Les 11 joueurs les plus souvent titulaires = titulaires habituels.
-function lineupSide(players, starters) {
-  const regulars = [...players].filter(p => p.starts > 0).sort((a, b) => b.starts - a.starts).slice(0, 11);
+// Compo officielle : absents = habituels hors du onze. Compo probable : habituels blessés
+// ou non alignés lors du dernier match.
+function lineupSide(players, starters, lastXI) {
+  const ranked = [...players].filter(p => p.starts > 0).sort((a, b) => b.starts - a.starts);
+  // Seuls les vrais piliers comptent (≥ 60 % des titularisations du joueur le plus utilisé) :
+  // un remplaçant qui tourne n'est pas une absence.
+  const maxStarts = ranked[0]?.starts || 0;
+  const regulars = ranked.slice(0, 11).filter(p => p.starts >= 0.6 * maxStarts);
   const official = starters && starters.size >= 11;
-  const absent = regulars.filter(p => (official ? !starters.has(p.id) : p.out));
+  const absent = regulars.filter(p => (official ? !starters.has(p.id) : p.out || (lastXI && !lastXI.has(p.id))));
   const contrib = Math.max(1, players.reduce((s, p) => s + p.g + 0.7 * p.a, 0));
   const lost = absent.reduce((s, p) => s + p.g + 0.7 * p.a, 0);
   const attackers = absent.filter(p => p.pos === 'F' || p.pos === 'M').length;
   const defenders = absent.filter(p => p.pos === 'D').length;
   const keeper = absent.some(p => p.pos === 'G');
+  // Le remplaçant compense une partie de la perte : effet modéré et plafonné
   return {
     absent: absent.map(({ name, pos, g, a }) => ({ name, pos, g, a })),
-    att: Math.min(0.25, 0.6 * lost / contrib + 0.012 * attackers),
-    def: Math.min(0.15, 0.03 * defenders + (keeper ? 0.05 : 0)),
-    known: regulars.length >= 11,
+    att: Math.min(0.15, 0.35 * lost / contrib + 0.008 * attackers),
+    def: Math.min(0.10, 0.02 * defenders + (keeper ? 0.04 : 0)),
+    known: ranked.length >= 11,
   };
 }
 
-async function loadLineup(m) {
-  const [sum, rh, ra] = await Promise.all([
-    getJson(`${API}${m.src.path}/summary?event=${m.eventId}`),
-    teamRoster(m.src.path, m.home.id),
-    teamRoster(m.src.path, m.away.id),
-  ]);
+// Le onze aligné par l'équipe lors de son dernier match (base de la compo probable).
+async function lastStarters(sum, teamId) {
+  const games = (sum.lastFiveGames || []).find(t => String(t.team?.id) === String(teamId))?.events || [];
+  const last = [...games].sort((a, b) => b.gameDate.localeCompare(a.gameDate))[0];
+  if (!last) return null;
+  const s = await getJson(`${API}soccer/all/summary?event=${last.id}`);
+  const r = (s.rosters || []).find(x => String(x.team?.id) === String(teamId));
+  const ids = new Set((r?.roster || []).filter(p => p.starter).map(p => String(p.athlete?.id)));
+  return ids.size >= 11 ? ids : null;
+}
+
+async function loadLineup(m, sum) {
+  const [rh, ra] = await Promise.all([teamRoster(m.src.path, m.home.id), teamRoster(m.src.path, m.away.id)]);
   const xi = side => {
     const r = (sum.rosters || []).find(x => x.homeAway === side);
     const ids = new Set((r?.roster || []).filter(p => p.starter).map(p => String(p.athlete?.id)));
@@ -413,12 +427,94 @@ async function loadLineup(m) {
   };
   const h = xi('home'), a = xi('away');
   const official = h.ids.size >= 11 && a.ids.size >= 11;
-  const home = { ...lineupSide(rh, official ? h.ids : null), formation: h.formation };
-  const away = { ...lineupSide(ra, official ? a.ids : null), formation: a.formation };
+  const [lastH, lastA] = official ? [null, null] : await Promise.all([
+    lastStarters(sum, m.home.id).catch(() => null),
+    lastStarters(sum, m.away.id).catch(() => null),
+  ]);
+  const home = { ...lineupSide(rh, official ? h.ids : null, lastH), formation: h.formation };
+  const away = { ...lineupSide(ra, official ? a.ids : null, lastA), formation: a.formation };
   m.lineup = (home.known && away.known) || official
-    ? { status: official ? 'official' : 'probable', at: Date.now(), home, away }
+    ? { status: official ? 'official' : 'probable', at: Date.now(), home, away, basedOnLast: !!(lastH || lastA) }
     : { status: 'unknown', at: Date.now() };
   return m.lineup;
+}
+
+// ---------- Données avancées ----------
+// 5 derniers résultats, confrontations directes et blessés, tirés du résumé ESPN du match.
+function parseDeep(m, sum) {
+  const last5 = {};
+  for (const [side, t] of [['home', m.home], ['away', m.away]]) {
+    const ev = (sum.lastFiveGames || []).find(x => String(x.team?.id) === String(t.id))?.events || [];
+    if (!ev.length) continue;
+    const sorted = [...ev].sort((a, b) => a.gameDate.localeCompare(b.gameDate));
+    let gf = 0, ga = 0;
+    for (const e of sorted) {
+      const home = String(e.homeTeamId) === String(t.id);
+      const hs = Number(e.homeTeamScore) || 0, as = Number(e.awayTeamScore) || 0;
+      gf += home ? hs : as;
+      ga += home ? as : hs;
+    }
+    last5[side] = { n: sorted.length, gf, ga, form: sorted.map(e => e.gameResult || '').join('') };
+  }
+  const ser = (sum.seasonseries || []).find(s => s.type === 'head-to-head') || sum.seasonseries?.[0];
+  let h2h = null, n = 0, pts = 0;
+  for (const e of ser?.events || []) {
+    if ((e.statusType?.state || e.status?.type?.state) !== 'post') continue;
+    const c = (e.competitors || []).find(x => String(x.id || x.team?.id) === String(m.home.id));
+    const o = (e.competitors || []).find(x => x !== c);
+    if (!c || !o) continue;
+    n++;
+    pts += c.winner ? 1 : o.winner ? 0 : 0.5;
+  }
+  if (n) h2h = { n, homeShare: pts / n, summary: ser.summary };
+  const injuries = {};
+  for (const [side, t] of [['home', m.home], ['away', m.away]]) {
+    const list = (sum.injuries || []).find(x => String(x.team?.id) === String(t.id))?.injuries || [];
+    injuries[side] = list.map(p => ({ name: p.athlete?.shortName || p.athlete?.displayName, status: p.status || '' }));
+  }
+  return {
+    at: Date.now(), last5, h2h,
+    injuries: injuries.home.length || injuries.away.length ? injuries : null,
+  };
+}
+
+// Analyse détaillée d'un match : un seul appel ESPN (gratuit), + effectifs au football.
+async function loadDeep(m) {
+  const sum = await getJson(`${API}${m.src.path}/summary?event=${m.eventId}`);
+  m.deep = parseDeep(m, sum);
+  if (m.sport === 'soccer') await loadLineup(m, sum);
+  return m;
+}
+
+// Classements (1 appel par compétition, gratuit) : buts/points marqués et encaissés.
+async function fetchStandings(matches) {
+  const paths = [...new Set(matches.filter(m => m.home.id && !['tennis', 'mma'].includes(m.sport)).map(m => m.src.path))];
+  const tables = new Map();
+  await pool(paths, 6, async path => {
+    try {
+      const j = await getJson(`https://site.api.espn.com/apis/v2/sports/${path}/standings`);
+      const entries = [];
+      const walk = node => { if (node.standings?.entries) entries.push(...node.standings.entries); (node.children || []).forEach(walk); };
+      walk(j);
+      const teams = new Map();
+      let gfSum = 0, gpSum = 0;
+      for (const e of entries) {
+        const s = {};
+        for (const x of e.stats || []) s[x.name] = x.value;
+        const gp = s.gamesPlayed || (s.wins || 0) + (s.losses || 0) + (s.ties || 0) + (s.otLosses || 0);
+        if (!gp || s.pointsFor == null || s.pointsAgainst == null) continue;
+        teams.set(String(e.team?.id), { gp, gf: s.pointsFor, ga: s.pointsAgainst, rank: s.rank || null });
+        gfSum += s.pointsFor;
+        gpSum += gp;
+      }
+      if (teams.size) tables.set(path, { teams, avg: gpSum ? gfSum / gpSum : null });
+    } catch { /* pas de classement (coupe, tournoi) */ }
+  });
+  for (const m of matches) {
+    const t = tables.get(m.src.path);
+    const h = t?.teams.get(String(m.home.id)), a = t?.teams.get(String(m.away.id));
+    m.adv = h && a ? { avg: t.avg, home: h, away: a } : null;
+  }
 }
 
 // ---------- Historique des pronostics ----------
@@ -490,68 +586,173 @@ function saveDay() {
   store.set(cacheKey(new Date(`${ui.data.day}T12:00:00`)), { ...rest, matches: matches.map(({ analysis, ...m }) => m) });
 }
 
-// Matchs du foot qui commencent dans moins de 80 min : les compos officielles sont souvent publiées.
-async function autoLineups(matches) {
+// Analyse détaillée automatique des matchs de foot qui commencent dans moins de 80 min
+// (les compos officielles sont souvent publiées).
+async function autoDeep(matches) {
   const soon = matches.filter(m => m.sport === 'soccer' && m.state === 'pre' && !m.canceled
     && new Date(m.date) - Date.now() < 80 * 60e3 && m.lineup?.status !== 'official').slice(0, 8);
-  await pool(soon, 3, async m => { try { await loadLineup(m); } catch { /* compo indisponible */ } });
+  await pool(soon, 3, async m => { try { await loadDeep(m); } catch { /* compo indisponible */ } });
+  return soon.length;
 }
 
-async function refresh() {
+const strip = ({ analysis, ...m }) => m;
+
+// Une mise à jour garde ce qui a déjà été chargé : vraies cotes, compos, analyse détaillée.
+function mergeKnown(fresh) {
+  const prev = new Map((ui.data?.day === dayKey(selectedDay()) ? ui.data.matches : []).map(m => [m.id, m]));
+  return fresh.map(m => {
+    const o = prev.get(m.id);
+    return o ? { ...m, books: o.books, oddsChecked: o.oddsChecked, lineup: o.lineup, deep: o.deep, adv: m.adv || o.adv } : m;
+  });
+}
+
+// Enregistre la journée, recalcule les pronostics et met à jour le bilan.
+function setData(matches, extra = {}) {
+  const same = ui.data?.day === dayKey(selectedDay()) ? ui.data : {};
+  const hiddenIds = [...new Set([...(same.hiddenIds || []), ...(extra.hiddenIds || [])])];
+  ui.data = {
+    day: dayKey(selectedDay()), fetchedAt: same.fetchedAt || Date.now(), failed: same.failed || [], oddsAt: same.oddsAt,
+    ...extra, hiddenIds,
+    matches: matches.filter(m => !hiddenIds.includes(m.id)).map(withAnalysis),
+  };
+  saveDay();
+  rememberPicks(ui.data.matches);
+}
+
+function setBusy(btn, on) {
+  btn.disabled = on;
+  btn.classList.toggle('busy', on);
+}
+
+// Mise à jour gratuite (ESPN) : matchs, scores, classements, compos. Aucun crédit utilisé.
+async function update() {
   const btn = $('#refresh');
   if (btn.disabled) return;
-  btn.disabled = true;
-  btn.classList.add('busy');
+  setBusy(btn, true);
   const label = $('#refresh-label');
   const day = selectedDay();
-  let oddsMsg = '';
   try {
     const { matches, failed } = await fetchDay(day, (d, n) => { label.textContent = `Matchs ${d}/${n}`; });
-    // Garde les compos déjà chargées pour la journée
-    const prev = new Map((ui.data?.day === dayKey(day) ? ui.data.matches : []).map(m => [m.id, m]));
-    for (const m of matches) if (prev.get(m.id)?.lineup) m.lineup = prev.get(m.id).lineup;
-    try {
-      const res = await fetchBooks(matches, day, t => { label.textContent = t; });
-      if (res) oddsMsg = ` · cotes réelles pour ${matches.filter(m => m.books).length} matchs`;
-    } catch (e) { oddsMsg = ` · ${e.message}`; }
+    label.textContent = 'Stats…';
+    await fetchStandings(matches);
+    const merged = mergeKnown(matches);
     label.textContent = 'Compos…';
-    await autoLineups(matches);
-    // Avec une clé, on écarte les matchs que ni Betclic ni Winamax ne proposent
-    const shown = matches.filter(m => !(m.oddsChecked && !m.books));
+    await autoDeep(merged);
     try {
       Object.keys(localStorage).filter(k => k.startsWith('pdj-v2-day-')).sort().slice(0, -2).forEach(k => localStorage.removeItem(k));
     } catch { /* ignore */ }
-    ui.data = { day: dayKey(day), fetchedAt: Date.now(), failed, hidden: matches.length - shown.length, matches: shown.map(withAnalysis) };
-    saveDay();
-    rememberPicks(ui.data.matches);
-    toast(shown.length ? `${shown.length} matchs trouvés${oddsMsg}` : 'Aucun match trouvé pour cette journée');
-  } catch (e) {
+    setData(merged, { fetchedAt: Date.now(), failed });
+    toast(ui.data.matches.length ? `${ui.data.matches.length} matchs à jour (gratuit)` : 'Aucun match trouvé pour cette journée');
+  } catch {
     toast('Impossible de joindre les sources. Vérifiez votre connexion internet puis réessayez.');
   } finally {
-    btn.disabled = false;
-    btn.classList.remove('busy');
-    label.textContent = 'Actualiser';
+    setBusy(btn, false);
+    label.textContent = 'Mettre à jour';
     render();
   }
 }
 
-async function refreshLineup(id) {
+// Coût estimé d'un chargement des vraies cotes (le réel dépend des compétitions reconnues).
+function estimateCost() {
+  if (!ui.data) return 0;
+  const groups = new Map();
+  for (const m of ui.data.matches) {
+    if (m.state !== 'pre' || m.canceled) continue;
+    const s = SRC_BY_PATH.get(m.src.path);
+    if (!s || !(s.odds || s.oddsTitle || s.sport === 'tennis')) continue;
+    groups.set(`${m.src.path}|${m.tournament || ''}`, s.sport === 'soccer' ? 2 : s.sport === 'tennis' || s.sport === 'mma' ? 1 : 3);
+  }
+  return Math.min(settings().maxCredits, [...groups.values()].reduce((a, b) => a + b, 0));
+}
+
+// Vraies cotes Betclic / Winamax : seul bouton qui utilise des crédits The Odds API.
+async function loadOdds() {
+  const btn = $('#odds-btn');
+  if (btn.disabled) return;
+  if (!ui.data) { toast('Mettez d’abord les matchs à jour.'); return; }
+  setBusy(btn, true);
+  try {
+    const res = await fetchBooks(ui.data.matches, selectedDay(), t => { btn.textContent = t; });
+    const hiddenIds = ui.data.matches.filter(m => m.oddsChecked && !m.books).map(m => m.id);
+    const withBooks = ui.data.matches.filter(m => m.books).length;
+    setData(ui.data.matches.map(strip), { hiddenIds, oddsAt: Date.now() });
+    toast(`Vraies cotes pour ${withBooks} matchs${hiddenIds.length ? ` · ${hiddenIds.length} non proposé(s) retiré(s)` : ''}${res?.credits ? ` · ${res.credits.remaining} crédits restants` : ''}`);
+  } catch (e) {
+    toast(e.message || 'Impossible de charger les cotes.');
+  } finally {
+    setBusy(btn, false);
+    render();
+  }
+}
+
+// Bouton « compos / stats » d'un match : recharge et recalcule le prono, puis montre ce qui a changé.
+async function refreshDeep(id) {
   const i = ui.data.matches.findIndex(m => m.id === id);
   if (i < 0 || ui.loadingLineup.has(id)) return;
   ui.loadingLineup.add(id);
   render();
   try {
-    const m = ui.data.matches[i];
-    const l = await loadLineup(m);
+    const before = ui.data.matches[i].analysis.best;
+    const m = strip(ui.data.matches[i]);
+    await loadDeep(m);
     ui.data.matches[i] = withAnalysis(m);
     saveDay();
     if (m.state === 'pre') rememberPicks([ui.data.matches[i]]);
-    toast(l.status === 'official' ? 'Compos officielles chargées' : l.status === 'probable' ? 'Compos officielles pas encore publiées : compo probable utilisée' : 'Compos indisponibles pour ce match');
+    const after = ui.data.matches[i].analysis.best;
+    const l = m.lineup;
+    const what = m.sport !== 'soccer' ? 'Blessés et stats pris en compte'
+      : l?.status === 'official' ? 'Compos officielles prises en compte'
+      : l?.status === 'probable' ? 'Compo probable prise en compte (officielle pas encore publiée)'
+      : 'Compos indisponibles, stats prises en compte';
+    toast(`${what} · prono : ${after.label === before.label ? `${after.label} ${pct(before.p)} → ${pct(after.p)}` : `${before.label} → ${after.label} (${pct(after.p)})`}`);
   } catch {
-    toast('Impossible de charger les compos. Réessayez plus tard.');
+    toast('Impossible de charger les compos et stats. Réessayez plus tard.');
   } finally {
     ui.loadingLineup.delete(id);
     render();
+  }
+}
+
+// ---------- Temps réel (gratuit) ----------
+// Toutes les minutes, quand l'app est ouverte : scores et statuts des matchs en cours ou sur le
+// point de commencer. Toutes les 5 minutes : compos des matchs de foot proches.
+const LIVE_MS = 60e3;
+let liveTicks = 0;
+let liveBusy = false;
+
+async function liveTick() {
+  if (liveBusy || document.hidden || !ui.data || ui.dayOffset !== 0 || ui.data.day !== dayKey(new Date())) return;
+  liveTicks++;
+  const now = Date.now();
+  const watch = ui.data.matches.filter(m => !m.canceled && (m.state === 'in' || (m.state === 'pre' && new Date(m.date) - now < 10 * 60e3)));
+  const lineupsDue = liveTicks % 5 === 0 && ui.data.matches.some(m => m.sport === 'soccer' && m.state === 'pre'
+    && new Date(m.date) - now < 80 * 60e3 && m.lineup?.status !== 'official');
+  if (!watch.length && !lineupsDue) return;
+  liveBusy = true;
+  try {
+    const day = selectedDay();
+    const dates = espnDatesFor(day);
+    const fresh = new Map();
+    await pool([...new Set(watch.map(m => m.src.path))], 4, async p => {
+      try { for (const f of await fetchSource(SRC_BY_PATH.get(p), dates, day, null)) fresh.set(f.id, f); } catch { /* réessai à la prochaine minute */ }
+    });
+    const matches = ui.data.matches.map(m => {
+      const base = strip(m);
+      const f = fresh.get(base.id);
+      if (!f) return base;
+      // On ne reprend que l'état du match : les données d'avant-match restent celles du jour
+      return {
+        ...base, state: f.state, detail: f.detail, canceled: f.canceled, date: f.date,
+        home: { ...base.home, score: f.home.score, winner: f.home.winner, sets: f.home.sets },
+        away: { ...base.away, score: f.away.score, winner: f.away.winner, sets: f.away.sets },
+      };
+    });
+    if (lineupsDue) await autoDeep(matches);
+    setData(matches);
+    ui.liveAt = Date.now();
+    render();
+  } finally {
+    liveBusy = false;
   }
 }
 
@@ -605,15 +806,21 @@ function renderHeader() {
     const at = new Date(ui.data.fetchedAt);
     const stale = dayKey(at) !== dayKey(new Date());
     const real = ui.data.matches.filter(m => m.books).length;
+    const live = ui.data.matches.filter(m => m.state === 'in').length;
     meta.innerHTML = `${ui.data.matches.length} matchs · mis à jour ${stale ? 'le ' + at.toLocaleDateString('fr-FR') + ' à ' : 'à '}${timeOf(at)}`
-      + ` · ${real ? `vraies cotes sur ${real} matchs` : 'cotes estimées'}`
+      + ` · ${real ? `vraies cotes sur ${real} matchs${ui.data.oddsAt ? ` (${timeOf(new Date(ui.data.oddsAt).toISOString())})` : ''}` : 'cotes estimées'}`
+      + (live ? ` · <span class="live-dot">Direct : ${live} match${live > 1 ? 's' : ''}${ui.liveAt ? `, scores à ${timeOf(new Date(ui.liveAt).toISOString())}` : ''}</span>` : '')
       + (ui.data.failed?.length ? ` · <span class="warn">${ui.data.failed.length} source(s) indisponible(s)</span>` : '');
     $('#stale').hidden = !stale;
   } else {
     meta.textContent = 'Pas encore de données pour cette journée';
     $('#stale').hidden = true;
   }
-  $('#odds-hint').hidden = !!settings().key;
+  const hasKey = !!settings().key;
+  $('#odds-hint').hidden = hasKey;
+  const ob = $('#odds-btn');
+  ob.hidden = !hasKey || !ui.data;
+  if (!ob.disabled) ob.textContent = `Charger les vraies cotes (≈ ${estimateCost()} crédits)`;
 }
 
 function renderRecord() {
@@ -664,19 +871,42 @@ function bars(n) {
   return `<span class="rel" title="Fiabilité des données" aria-label="Fiabilité ${n} sur 3">${[1, 2, 3].map(i => `<i class="${i <= n ? 'on' : ''}"></i>`).join('')}</span>`;
 }
 
-function lineupBlock(m) {
-  if (m.sport !== 'soccer' || m.state !== 'pre') return '';
+// Effet des compos / blessés / stats détaillées sur le prono : avant → après.
+function deepEffect(m) {
+  if (!m.lineup?.home && !m.deep) return '';
+  const base = Engine.analyze({ ...m, lineup: null, deep: null });
+  const now = m.analysis;
+  const rows = now.bets
+    .filter(b => b.type === 'ml' || b.type === 'win' || b === now.best)
+    .map(b => {
+      const old = base.bets.find(x => x.type === b.type && x.side === b.side && x.line === b.line);
+      if (!old) return '';
+      const d = Math.round((b.p - old.p) * 100);
+      return `<li>${esc(b.label)} : ${pct(old.p)} → <b>${pct(b.p)}</b> <span class="delta ${d > 0 ? 'up' : d < 0 ? 'down' : ''}">${d > 0 ? '+' : ''}${d}</span></li>`;
+    }).join('');
+  const changed = base.best.label !== now.best.label ? `<p>Meilleur pari : « ${esc(base.best.label)} » → <b>« ${esc(now.best.label)} »</b></p>` : '';
+  return `<div class="effect"><p class="effect-title">Effet des compos et stats détaillées sur le prono</p><ul>${rows}</ul>${changed}</div>`;
+}
+
+function deepBlock(m) {
+  if (m.state !== 'pre' || m.sport === 'tennis' || !m.home.id) return '';
   const l = m.lineup;
   const loading = ui.loadingLineup.has(m.id);
+  const at = x => timeOf(new Date(x).toISOString());
   let status;
-  if (!l) status = 'Compos non chargées. Les compos officielles sortent environ 1 h avant le coup d’envoi.';
-  else if (l.status === 'official') status = `Compos officielles chargées à ${timeOf(new Date(l.at).toISOString())} (${esc(l.home.formation || '?')} contre ${esc(l.away.formation || '?')}).`;
-  else if (l.status === 'probable') status = `Compo probable (titulaires habituels moins les blessés connus), vérifiée à ${timeOf(new Date(l.at).toISOString())}. Officielle environ 1 h avant le match.`;
-  else status = 'Pas assez de données pour estimer les compos de ce match.';
+  if (m.sport === 'soccer') {
+    if (!l) status = 'Compos et stats détaillées (5 derniers matchs, confrontations) non chargées. Les compos officielles sortent environ 1 h avant le coup d’envoi.';
+    else if (l.status === 'official') status = `Compos officielles chargées à ${at(l.at)} (${esc(l.home.formation || '?')} contre ${esc(l.away.formation || '?')}).`;
+    else if (l.status === 'probable') status = `Compo probable (${l.basedOnLast ? 'onze du dernier match, moins les blessés connus' : 'titulaires habituels moins les blessés connus'}), vérifiée à ${at(l.at)}. Son effet compte à 60 % ; la compo officielle sort environ 1 h avant le match.`;
+    else status = 'Pas assez de données pour estimer les compos de ce match.';
+  } else {
+    status = m.deep ? `Blessés, confrontations et forme chargés à ${at(m.deep.at)}.` : 'Blessés, confrontations directes et forme récente non chargés.';
+  }
+  const label = loading ? 'Chargement…' : m.sport === 'soccer' ? (l ? 'Revérifier les compos' : 'Charger compos et stats') : (m.deep ? 'Revérifier blessés et stats' : 'Charger blessés et stats');
   return `<div class="lineup">
-    <p>${status}</p>
-    <button type="button" class="ghost" data-lineup="${esc(m.id)}" ${loading ? 'disabled' : ''}>${loading ? 'Chargement…' : l ? 'Revérifier les compos' : 'Charger les compos'}</button>
-  </div>`;
+    <p>${status} <small>Gratuit, ne consomme aucun crédit.</small></p>
+    <button type="button" class="ghost" data-lineup="${esc(m.id)}" ${loading ? 'disabled' : ''}>${label}</button>
+  </div>${deepEffect(m)}`;
 }
 
 function oddCell(o, fair) {
@@ -688,7 +918,7 @@ function oddCell(o, fair) {
 function matchCard(m) {
   const { best, bets, reliability, text } = m.analysis;
   const open = ui.open.has(m.id);
-  const when = m.canceled ? 'Reporté' : m.state === 'pre' ? timeOf(m.date) : m.state === 'in' ? 'En cours' : 'Terminé';
+  const when = m.canceled ? 'Reporté' : m.state === 'pre' ? timeOf(m.date) : m.state === 'in' ? esc(m.detail || 'En cours') : 'Terminé';
   const lineupBadge = m.lineup?.status === 'official' ? '<span class="badge">Compos officielles</span>' : '';
   const pick = m.state === 'pre' && !m.canceled
     ? `<div class="pick"><span class="pick-label">${esc(best.label)}</span><span class="pick-p">${pct(best.p)}</span>${oddTag(best)}</div>`
@@ -706,7 +936,7 @@ function matchCard(m) {
     ${open ? `<div class="details">
       ${lineupBadge}
       <ul class="analysis">${text.map(t => `<li>${esc(t)}</li>`).join('')}</ul>
-      ${lineupBlock(m)}
+      ${deepBlock(m)}
       <div class="table-wrap"><table>
         <thead><tr><th>Pari</th><th class="n">Proba</th><th class="n">Cote juste</th><th class="n">Betclic</th><th class="n">Winamax</th></tr></thead>
         <tbody>${rows}</tbody></table></div>
@@ -754,7 +984,7 @@ function render() {
     list.innerHTML = '';
     empty.hidden = false;
     empty.innerHTML = `<p class="empty-title">Aucun match chargé pour ${ui.dayOffset ? 'demain' : "aujourd'hui"}</p>
-      <p>Appuyez sur <b>Actualiser</b> pour rechercher les matchs de la journée proposés par Betclic et Winamax et calculer les pronostics.</p>`;
+      <p>Appuyez sur <b>Mettre à jour</b> (gratuit) pour rechercher les matchs de la journée proposés par Betclic et Winamax et calculer les pronostics.</p>`;
     return;
   }
   renderTop(ui.data.matches);
@@ -789,15 +1019,16 @@ function saveSettings(e) {
   const maxCredits = Math.max(1, Math.min(100, Number($('#max-credits').value) || 20));
   store.set('pdj-settings', { key, maxCredits });
   $('#settings').close();
-  toast(key ? 'Clé enregistrée : appuyez sur Actualiser pour charger les vraies cotes' : 'Clé supprimée : les cotes seront estimées');
+  toast(key ? 'Clé enregistrée : appuyez sur « Charger les vraies cotes »' : 'Clé supprimée : les cotes seront estimées');
   render();
 }
 
 function saveUi() { store.set('pdj-ui', { dayOffset: ui.dayOffset, status: ui.status }); }
 
 function bind() {
-  $('#refresh').addEventListener('click', refresh);
-  $('#stale-refresh').addEventListener('click', refresh);
+  $('#refresh').addEventListener('click', update);
+  $('#stale-refresh').addEventListener('click', update);
+  $('#odds-btn').addEventListener('click', loadOdds);
   $('#open-settings').addEventListener('click', openSettings);
   $('#odds-hint-open').addEventListener('click', openSettings);
   $('#settings-form').addEventListener('submit', saveSettings);
@@ -823,7 +1054,7 @@ function bind() {
   $('#search').addEventListener('input', e => { ui.query = e.target.value; render(); });
   $('#list').addEventListener('click', e => {
     const lu = e.target.closest('[data-lineup]');
-    if (lu) { refreshLineup(lu.dataset.lineup); return; }
+    if (lu) { refreshDeep(lu.dataset.lineup); return; }
     const head = e.target.closest('.match-head');
     if (!head) return;
     const id = head.closest('.match').dataset.id;
@@ -846,6 +1077,8 @@ function bind() {
 bind();
 loadCached();
 render();
+setInterval(liveTick, LIVE_MS);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) liveTick(); });
 
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
