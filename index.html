@@ -89,38 +89,13 @@
 
   <section id="view-defis" class="defis" role="tabpanel" hidden aria-labelledby="defi-title">
     <h2 id="defi-title">Défis freebets Winamax et Betclic</h2>
-    <p class="meta">Recopiez les conditions du défi affiché dans votre appli. L’app cherche les paris des matchs à venir (aujourd’hui et demain) qui les respectent au plus juste, puis dit si le défi vaut le coup.</p>
-    <form id="defi-form" class="defi-form">
-      <label>Bookmaker
-        <select name="book"><option value="winamax">Winamax</option><option value="betclic">Betclic</option><option value="both">Les deux</option></select>
-      </label>
-      <label>Type de pari
-        <select name="kind"><option value="single">Pari simple</option><option value="combo">Combiné</option></select>
-      </label>
-      <label>Cote minimum par sélection
-        <input name="minOdd" type="number" inputmode="decimal" min="1.01" step="0.01" placeholder="1,10">
-      </label>
-      <label>Cote maximum par sélection <small>(si le défi en impose une)</small>
-        <input name="maxOdd" type="number" inputmode="decimal" min="1.01" step="0.01" placeholder="aucune">
-      </label>
-      <label class="combo-only">Nombre de sélections minimum
-        <input name="legs" type="number" inputmode="numeric" min="2" max="20" step="1">
-      </label>
-      <label class="combo-only">Cote totale minimum
-        <input name="minTotal" type="number" inputmode="decimal" min="1.01" step="0.01" placeholder="aucune">
-      </label>
-      <label>Sport imposé
-        <select name="sport"></select>
-      </label>
-      <label>Mise demandée (€)
-        <input name="stake" type="number" inputmode="decimal" min="0" step="0.5" placeholder="ex. 10">
-      </label>
-      <label>Freebet gagné (€)
-        <input name="freebet" type="number" inputmode="decimal" min="0" step="0.5" placeholder="ex. 5">
-      </label>
-      <label class="check"><input name="onlyIfWon" type="checkbox"> Freebet versé seulement si le pari est gagné</label>
-      <button type="button" id="defi-reset" class="ghost">Réinitialiser</button>
-    </form>
+    <p class="meta">Ajoutez une capture d’écran d’un défi Winamax ou Betclic : l’app lit les conditions toute seule, cherche les paris des matchs à venir (aujourd’hui et demain) qui les remplissent au plus juste et dit si le défi vaut le coup. La capture reste sur votre téléphone.</p>
+    <button type="button" id="defi-add" class="defi-add">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z M12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+      Ajouter une capture de défi
+    </button>
+    <input id="defi-file" type="file" accept="image/*" multiple hidden>
+    <div id="defi-list" class="defi-list"></div>
     <details class="traps">
       <summary>Pièges à vérifier dans les conditions du défi</summary>
       <ul>
@@ -132,7 +107,6 @@
         <li>Ne misez jamais plus que prévu juste pour débloquer un freebet.</li>
       </ul>
     </details>
-    <div id="defi-results" class="defi-results"></div>
   </section>
 
   <footer class="foot">
