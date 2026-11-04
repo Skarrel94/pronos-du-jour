@@ -229,8 +229,8 @@ function bet(type, side, line, label, p, pm) {
 }
 
 // Ajoute à chaque pari : cote juste, cotes Betclic/Winamax (réelles ou estimées), value.
-function priceBets(bets, m) {
-  const malus = m.src?.minor ? MINOR_LEAGUE_MALUS : 0;
+function priceBets(bets, m, extraMargin = 0) {
+  const malus = (m.src?.minor ? MINOR_LEAGUE_MALUS : 0) + extraMargin;
   for (const b of bets) {
     b.fair = 1 / b.p;
     b.odds = {};
@@ -397,6 +397,8 @@ function pointsMarkets(m, pModel2, cfg, data) {
   const tsd = m.src.tsd ?? cfg.tsd;
   data.margin = mu;
   data.total = total;
+  data.sd = sd;
+  data.tsd = tsd;
   data.marketSrc = mk?.src;
 
   const bets = [
@@ -495,7 +497,143 @@ function analyze(m) {
   }
   priceBets(bets, m);
   const best = pickBest(bets);
-  return { bets, best, reliability: reliability(m, gp, data.marketSrc), text: explain(m, best, data) };
+  return { bets, best, reliability: reliability(m, gp, data.marketSrc), text: explain(m, best, data), model: data };
+}
+
+// ---------- Estimation en direct (gratuite, d'après le score) ----------
+// On part du modèle d'avant-match (buts / points attendus, chance de gagner un set) et on ne garde
+// que ce qui reste à jouer, en ajoutant le score actuel. Les cotes sont estimées avec la marge
+// habituelle du bookmaker, un peu plus forte en direct : aucune vraie cote, aucun crédit utilisé.
+const LIVE_MARGIN = 0.02;
+const PERIODS = { basketball: 4, football: 4, hockey: 3, afl: 4, baseball: 9 };
+
+// Part du match déjà jouée (0 à 1)
+function playedShare(m) {
+  const per = Number(m.period) || 1;
+  const d = String(m.detail || '');
+  if (m.sport === 'soccer' || m.sport === 'rugby') {
+    const full = m.sport === 'soccer' ? 90 : 80;
+    if (/^(HT|MT)$|half/i.test(d)) return 0.5;
+    const min = m.clock != null ? Number(m.clock) / 60 : parseInt(d, 10);
+    return Number.isFinite(min) ? clamp(min / full, 0, 0.985) : 0.5;
+  }
+  if (m.sport === 'baseball') {
+    const half = /bot|mid|middle/i.test(d) ? 0.5 : /end/i.test(d) ? 1 : 0;
+    return clamp((per - 1 + half) / 9, 0, 0.97);
+  }
+  const n = PERIODS[m.sport] || 4;
+  if (per > n) return 0.985; // prolongation
+  const len = m.sport === 'basketball' ? (/nba/.test(m.src?.path || '') ? 12 : 10) : m.sport === 'football' ? 15 : 20;
+  const left = m.clock != null ? Number(m.clock) / 60 : len / 2;
+  return clamp((per - 1 + 1 - clamp(left / len, 0, 1)) / n, 0, 0.985);
+}
+
+// Probabilité de gagner un set depuis le score en jeux (i-j), avec g = chance de gagner un jeu.
+function setFrom(i, j, g) {
+  if ((i >= 6 && i - j >= 2) || i === 7) return 1;
+  if ((j >= 6 && j - i >= 2) || j === 7) return 0;
+  if (i === 6 && j === 6) return g;
+  return g * setFrom(i + 1, j, g) + (1 - g) * setFrom(i, j + 1, g);
+}
+
+function liveTennis(m, model) {
+  const q = model.setProb ?? 0.5;
+  let lo = 0.01, hi = 0.99;
+  for (let k = 0; k < 30; k++) { const g = (lo + hi) / 2; if (setFrom(0, 0, g) < q) lo = g; else hi = g; }
+  const g = (lo + hi) / 2;
+  const hs = m.home.games || [], as = m.away.games || [];
+  let sh = 0, sa = 0, gh = 0, ga = 0;
+  hs.forEach((x, i) => {
+    if (x.w) sh++; else if (as[i]?.w) sa++; else { gh = x.v || 0; ga = as[i]?.v || 0; }
+  });
+  const bo = sh >= 2 || sa >= 2 ? 5 : 3;
+  const need = Math.ceil(bo / 2);
+  const s = setFrom(gh, ga, g); // set en cours
+  // W : victoire du joueur 1 ; T : match en 3 sets (au meilleur des 3)
+  const W = (a, b) => (a >= need ? 1 : b >= need ? 0 : q * W(a + 1, b) + (1 - q) * W(a, b + 1));
+  const T = (a, b) => (a >= 2 || b >= 2 ? (a + b === 3 ? 1 : 0) : q * T(a + 1, b) + (1 - q) * T(a, b + 1));
+  const pH = s * W(sh + 1, sa) + (1 - s) * W(sh, sa + 1);
+  const bets = [
+    bet('win', 'H', null, `Victoire ${m.home.short}`, pH),
+    bet('win', 'A', null, `Victoire ${m.away.short}`, 1 - pH),
+  ];
+  if (bo === 3) {
+    const p3 = s * T(sh + 1, sa) + (1 - s) * T(sh, sa + 1);
+    bets.push(bet('sets', 'Y', null, 'Nombre de sets : 3', p3), bet('sets', 'N', null, 'Nombre de sets : 2', 1 - p3));
+  }
+  const score = hs.map((x, i) => `${x.v ?? 0}-${as[i]?.v ?? 0}`).join(' ') || '0-0';
+  return { bets, share: null, desc: `score ${score} (sets ${sh}-${sa})`, note: `chance estimée de ${m.home.short} sur un set : ${pct(q)}` };
+}
+
+function liveSoccer(m, model, f) {
+  const H = m.home.short, A = m.away.short;
+  const h0 = Number(m.home.score) || 0, a0 = Number(m.away.score) || 0;
+  const [xh, xa] = model.xg || [1.35, 1.15];
+  const r = 1 - f;
+  const ph = poissonPmf(xh * r), pa = poissonPmf(xa * r);
+  let pH = 0, pD = 0, pA = 0, btts = 0;
+  const tot = {};
+  ph.forEach((x, i) => pa.forEach((y, j) => {
+    const p = x * y, h = h0 + i, a = a0 + j;
+    if (h > a) pH += p; else if (h === a) pD += p; else pA += p;
+    if (h > 0 && a > 0) btts += p;
+    tot[h + a] = (tot[h + a] || 0) + p;
+  }));
+  const over = line => Object.entries(tot).reduce((s, [t, p]) => s + (Number(t) > line ? p : 0), 0);
+  const bets = [
+    bet('ml', 'H', null, `Victoire ${H}`, pH), bet('ml', 'D', null, 'Match nul', pD), bet('ml', 'A', null, `Victoire ${A}`, pA),
+    bet('dc', '1X', null, `${H} ou nul (1N)`, pH + pD), bet('dc', 'X2', null, `${A} ou nul (N2)`, pA + pD), bet('dc', '12', null, `${H} ou ${A} (12)`, pH + pA),
+    bet('dnb', 'H', null, `${H} (remboursé si nul)`, pH / (pH + pA)), bet('dnb', 'A', null, `${A} (remboursé si nul)`, pA / (pH + pA)),
+    bet('btts', 'Y', null, 'Les deux équipes marquent : oui', btts), bet('btts', 'N', null, 'Les deux équipes marquent : non', 1 - btts),
+  ];
+  const cur = h0 + a0;
+  for (const line of [cur + 0.5, cur + 1.5, cur + 2.5]) {
+    bets.push(bet('ou', 'O', line, `Plus de ${num(line)} buts`, over(line)), bet('ou', 'U', line, `Moins de ${num(line)} buts`, 1 - over(line)));
+  }
+  return { bets, desc: `${h0}-${a0} à la ${Math.round(f * 90)}e minute`, note: `buts encore attendus : ${(xh * r).toFixed(2).replace('.', ',')} pour ${H}, ${(xa * r).toFixed(2).replace('.', ',')} pour ${A}` };
+}
+
+function livePoints(m, model, f, cfg) {
+  const H = m.home.short, A = m.away.short;
+  const h0 = Number(m.home.score) || 0, a0 = Number(m.away.score) || 0;
+  const r = Math.max(0.015, 1 - f);
+  const sd = (model.sd ?? cfg.sd ?? 12) * Math.sqrt(r), tsd = (model.tsd ?? cfg.tsd ?? 15) * Math.sqrt(r);
+  const mean = h0 - a0 + (model.margin ?? 0) * r;
+  const total = h0 + a0 + (model.total ?? cfg.total ?? 0) * r;
+  const pH = clamp(normCdf(mean / sd), 0.005, 0.995);
+  const unit = m.sport === 'hockey' ? 'buts' : m.sport === 'baseball' ? 'points (runs)' : 'points';
+  const bets = [bet('ml', 'H', null, `Victoire ${H}`, pH), bet('ml', 'A', null, `Victoire ${A}`, 1 - pH)];
+  const line = Math.round(-mean) + (mean >= 0 ? 0.5 : -0.5);
+  const pc = clamp(normCdf((mean + line) / sd), 0.01, 0.99);
+  bets.push(bet('hcp', 'H', line, `${H} ${fmtLine(line)} (handicap)`, pc), bet('hcp', 'A', -line, `${A} ${fmtLine(-line)} (handicap)`, 1 - pc));
+  const step = Math.max(1, Math.round(tsd / 2));
+  const base = Math.round(total) + 0.5;
+  for (const k of [-2, -1, 0, 1, 2]) {
+    const tl = base + k * step;
+    if (tl <= h0 + a0) continue;
+    const po = clamp(1 - normCdf((tl - total) / tsd), 0.005, 0.995);
+    bets.push(bet('ou', 'O', tl, `Plus de ${num(tl)} ${unit}`, po), bet('ou', 'U', tl, `Moins de ${num(tl)} ${unit}`, 1 - po));
+  }
+  return { bets, desc: `${h0}-${a0}, ${Math.round(f * 100)} % du match joué`, note: `écart final attendu : ${Math.abs(mean).toFixed(1).replace('.', ',')} pour ${mean >= 0 ? H : A}, total ≈ ${total.toFixed(0)}` };
+}
+
+// Analyse d'un match en cours. null si le sport ne s'y prête pas (MMA) ou si le score manque.
+function live(m) {
+  if (m.state !== 'in' || m.sport === 'mma') return null;
+  const cfg = SPORT_CFG[m.sport] || SPORT_CFG.basketball;
+  const model = analyze({ ...m, state: 'pre' }).model;
+  const f = m.sport === 'tennis' ? null : playedShare(m);
+  const res = m.sport === 'tennis' ? liveTennis(m, model) : m.sport === 'soccer' ? liveSoccer(m, model, f) : livePoints(m, model, f, cfg);
+  // Paris quasi joués (cote sous 1,02) : les bookmakers les ferment
+  const bets = priceBets(res.bets.filter(b => b.p < 0.97 && b.p > 0.02), { ...m, books: null }, LIVE_MARGIN)
+    .filter(b => b.bestOdd.v >= 1.03);
+  if (!bets.length) return null;
+  const best = pickBest(bets);
+  const text = [
+    `En direct : ${res.desc}. Probabilités recalculées d’après le score et le temps restant, à partir de notre modèle d’avant-match (${res.note}).`,
+    'Cotes live estimées (marge du bookmaker un peu plus forte en direct) : elles bougent à chaque action, vérifiez-les dans l’appli avant de jouer. Aucun crédit utilisé.',
+  ];
+  return { bets, best, reliability: 1, text, live: true, share: f };
 }
 
 // ---------- Analyse rédigée ----------
@@ -607,5 +745,5 @@ function settle(b, res) {
   }
 }
 
-window.Engine = { analyze, settle, americanToDecimal, SPORT_CFG, BOOKS };
+window.Engine = { analyze, live, settle, americanToDecimal, SPORT_CFG, BOOKS };
 })();

@@ -358,3 +358,30 @@ td.value { color: var(--ok); font-weight: 600; background: color-mix(in srgb, va
 .to-top[hidden] { display: none; }
 #view-matchs { display: flex; flex-direction: column; gap: 18px; }
 #view-matchs[hidden], .defis[hidden] { display: none; }
+
+/* ---------- Détail d'un match ouvert depuis un top ---------- */
+.t-more { font-size: 12px; font-weight: 600; color: var(--accent-text); }
+.t-more::after { content: " ▾"; }
+.peek.open .t-more::after { content: " ▴"; }
+.peek.open .ticket { border-radius: var(--r) var(--r) 0 0; }
+.peek-body { background: var(--surface); border-radius: 0 0 var(--r) var(--r); border-top: 2px dashed var(--line); }
+.peek-head { padding: 10px 12px 0; }
+.peek-body .details { border-top: 0; }
+.badge.live { color: var(--ko); background: color-mix(in srgb, var(--ko) 13%, transparent); }
+
+/* ---------- Tennis : jeux par set ---------- */
+.tgames { margin-left: auto; display: inline-flex; align-items: baseline; gap: 2px; padding-left: 6px; font: 500 14px var(--font-num); font-variant-numeric: tabular-nums; }
+.tgames .score { margin: 0 4px 0 0; padding: 0; min-width: 14px; text-align: center; }
+.tgames .g { min-width: 20px; text-align: center; color: var(--ink-2); position: relative; }
+.tgames .g.won { color: var(--ink); font-weight: 700; }
+.tgames .g.cur { color: var(--accent-ink); background: var(--accent); border-radius: 4px; font-weight: 700; }
+.tgames sup { font-size: 9px; margin-left: 1px; }
+
+/* ---------- Défis : 2 captures ---------- */
+.defi-thumbs { display: flex; gap: 6px; flex: none; }
+.defi-more {
+  width: 52px; height: 52px; border-radius: 6px; border: 2px dashed var(--accent); background: var(--surface);
+  color: var(--accent-text); font: 700 20px/1 var(--font-display); display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 1px; cursor: pointer; padding: 0;
+}
+.defi-more small { font: 600 9px/1 var(--font-body); }

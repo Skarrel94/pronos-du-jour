@@ -59,7 +59,7 @@ const SPORT_WORDS = [
 // Transforme le texte lu en conditions. Tout ce qui n'est pas trouvé garde une valeur prudente.
 function parseDefi(raw, leagues = []) {
   const t = flat(raw).replace(/[«»"“”]/g, ' ').replace(/\s+/g, ' ');
-  const c = { book: 'both', kind: 'single', minOdd: null, minTotal: null, maxOdd: null, legs: 1, stake: null, freebet: null, when: 'won', sport: 'all', league: null, deadline: null, lottery: false, tickets: false, found: [] };
+  const c = { noLive: false, book: 'both', kind: 'single', minOdd: null, minTotal: null, maxOdd: null, legs: 1, stake: null, freebet: null, when: 'won', sport: 'all', league: null, deadline: null, lottery: false, tickets: false, found: [] };
 
   const wina = /winamax/.test(t), betc = /betclic/.test(t);
   if (wina !== betc) c.book = wina ? 'winamax' : 'betclic';
@@ -117,6 +117,8 @@ function parseDefi(raw, leagues = []) {
   c.lottery = /tirage au sort/.test(t);
   c.tickets = /tickets?/.test(t) && /(pari gagne|paris gagnes|chaque pari)/.test(t);
   if (c.lottery) c.when = 'won';
+  // Paris en direct exclus ?
+  c.noLive = /(hors live|hors direct|avant-match uniquement|pre-?match uniquement|paris? en direct (?:ne sont pas|exclus|non)|live exclus|hors paris? en direct)/.test(t);
 
   // Date limite : « … au jeudi 5 novembre 2026 à 01:00 »
   const MONTHS = ['janvier', 'fevrier', 'mars', 'avril', 'mai', 'juin', 'juillet', 'aout', 'septembre', 'octobre', 'novembre', 'decembre'];
@@ -145,6 +147,7 @@ function conditionsText(c) {
   if (c.minTotal) parts.push(`cote totale ≥ ${odd(c.minTotal)}`);
   if (c.maxOdd) parts.push(`cote ≤ ${odd(c.maxOdd)}`);
   if (c.deadline) parts.push(`matchs finis avant le ${new Date(c.deadline).toLocaleString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`);
+  if (c.noLive) parts.push('avant-match uniquement');
   if (c.league) parts.push(c.league);
   else if (c.sport !== 'all') parts.push(Engine.SPORT_CFG[c.sport]?.label || c.sport);
   if (c.stake) parts.push(`mise ${num2(c.stake)} €`);
@@ -167,7 +170,17 @@ function defiMatches() {
   }
   const soon = Date.now() + 2 * 60e3;
   const seen = new Set();
-  return out.filter(m => m.state === 'pre' && !m.canceled && new Date(m.date) > soon && !seen.has(m.id) && seen.add(m.id));
+  const today = ui.data?.day === dayKey(new Date()) ? new Set(ui.data.matches.map(m => m.id)) : new Set();
+  return out.filter(m => !m.canceled && !seen.has(m.id) && seen.add(m.id)).map(m => {
+    if (m.state === 'pre' && new Date(m.date) > soon) return m;
+    // En cours : seulement si les scores sont tenus à jour (journée d'aujourd'hui affichée)
+    if (m.state === 'in' && today.has(m.id)) {
+      const liveA = Engine.live(m);
+      // Fin de match : trop tard pour parier (marchés fermés ou cotes sans intérêt)
+      return liveA && !(liveA.share > 0.93) ? { ...m, liveA } : null;
+    }
+    return null;
+  }).filter(Boolean);
 }
 
 // Cote du pari chez le bookmaker choisi (« both » : la meilleure des deux).
@@ -181,7 +194,7 @@ function bookOdd(b, book) {
 function eligibleBets(m, c) {
   const min = c.minOdd || 1.01;
   const max = c.maxOdd || Infinity;
-  return m.analysis.bets
+  return (m.liveA || m.analysis).bets
     .map(b => ({ m, b, o: bookOdd(b, c.book) }))
     .filter(x => x.o && x.o.v >= min + (x.o.real ? 0 : EST_MARGIN) && x.o.v <= max)
     .sort((x, y) => y.b.p - x.b.p || x.o.v - y.o.v);
@@ -241,23 +254,39 @@ function defiOddTag(o) {
   return `<span class="bk ${o.real ? 'real' : 'est'}">${o.real ? '' : '≈ '}${odd(o.v)} <small>${bookName(o.book)}</small></span>`;
 }
 
-function defiRow(x, i) {
+// Score court pour un match en cours : « 1-0 » ou, au tennis, les jeux des sets « 6-4 2-3 »
+function liveScore(m) {
+  if (m.sport === 'tennis') return (m.home.games || []).map((g, i) => `${g.v ?? 0}-${m.away.games?.[i]?.v ?? 0}`).join(' ');
+  return `${m.home.score ?? 0}-${m.away.score ?? 0}`;
+}
+
+function defiRow(x, i, did) {
   const { m, b, o } = x;
   const why = [];
-  if (m.lineup?.status === 'official') why.push('compos officielles prises en compte');
-  else if (m.lineup?.status === 'probable') why.push('compo probable prise en compte');
-  if (m.books) why.push('vraie cote');
-  why.push(`fiabilité ${m.analysis.reliability}/3`);
-  return `<li><button class="ticket" data-goto-match="${esc(m.id)}" data-day-of="${esc(dayKey(new Date(m.date)))}">
+  if (m.liveA) why.push('cote live estimée d’après le score');
+  else {
+    if (m.lineup?.status === 'official') why.push('compos officielles prises en compte');
+    else if (m.lineup?.status === 'probable') why.push('compo probable prise en compte');
+    if (m.books) why.push('vraie cote');
+    why.push(`fiabilité ${m.analysis.reliability}/3`);
+  }
+  const key = `${did}:${m.id}`;
+  const open = ui.peek.has(key);
+  const when = m.liveA
+    ? `<span class="live-dot">En direct</span> · ${esc(liveScore(m))}${m.sport !== 'tennis' && m.detail ? ` (${esc(m.detail)})` : ''}`
+    : `${dayLabel(m.date)}${timeOf(m.date)}`;
+  const inToday = ui.data?.day === dayKey(new Date(m.date)) && ui.data.matches.some(x => x.id === m.id);
+  return `<li class="peek${open ? ' open' : ''}"><button class="ticket" data-peek="${esc(key)}" aria-expanded="${open}">
     <span class="t-rank">${i + 1}</span>
     <span class="t-body">
       <span class="t-match">${esc(m.home.short)} – ${esc(m.away.short)}</span>
-      <span class="t-meta">${dayLabel(m.date)}${timeOf(m.date)} · ${esc(Engine.SPORT_CFG[m.sport].label)} · ${esc(m.league)}</span>
+      <span class="t-meta">${when} · ${esc(Engine.SPORT_CFG[m.sport].label)} · ${esc(m.league)}</span>
       <span class="t-bet">${esc(b.label)}</span>
       <span class="t-meta">${esc(why.join(' · '))}</span>
+      <span class="t-more">${open ? 'Masquer le détail' : 'Voir le détail et les stats'}</span>
     </span>
     <span class="t-num"><b>${pct(b.p)}</b>${defiOddTag(o)}</span>
-  </button></li>`;
+  </button>${open ? `<div class="peek-body">${peekHead(m)}${matchDetails(m, { a: m.liveA || m.analysis, deep: inToday, hl: b })}</div>` : ''}</li>`;
 }
 
 function valueBlock(c, p, o) {
@@ -282,35 +311,43 @@ function valueBlock(c, p, o) {
   </div>`;
 }
 
-function defiResults(c) {
+function defiResults(c, did) {
   const DUR = { soccer: 2, tennis: 3, basketball: 2.5, football: 3.5, baseball: 3.5, hockey: 2.75, rugby: 2, mma: 1, afl: 3 };
+  const ends = m => (m.liveA ? Date.now() + (DUR[m.sport] || 3) * (1 - (m.liveA.share ?? 0.5)) * 36e5
+    : new Date(m.date).getTime() + (DUR[m.sport] || 3) * 36e5);
   const all = defiMatches().filter(m => (c.sport === 'all' || m.sport === c.sport) && (!c.league || m.league === c.league)
-    && (!c.deadline || new Date(m.date).getTime() + (DUR[m.sport] || 3) * 36e5 <= c.deadline));
+    && !(c.noLive && m.liveA) && (!c.deadline || ends(m) <= c.deadline));
+  const row = (x, i) => defiRow(x, i, did);
+  const liveNote = shown => shown.some(x => x.m.liveA) ? '<p class="hint">Matchs en direct : probabilités et cotes estimées d’après le score, sans crédit. Les cotes live changent vite et certains défis excluent le direct : vérifiez dans l’appli.</p>' : '';
   if (!all.length) {
-    return `<p class="defi-empty">Aucun match à venir${c.league ? ` en ${esc(c.league)}` : ''} chargé. Appuyez sur <b>Mettre à jour</b> (gratuit) pour aujourd’hui et pour demain.</p>`;
+    return `<p class="defi-empty">Aucun match à venir ou en cours${c.league ? ` en ${esc(c.league)}` : ''} chargé. Appuyez sur <b>Mettre à jour</b> (gratuit) pour aujourd’hui et pour demain.</p>`;
   }
   const options = all.map(m => eligibleBets(m, c)).filter(o => o.length).sort((a, b) => b[0].b.p - a[0].b.p);
   const estNote = all.some(m => m.books) ? '' : `<p class="hint">Cotes estimées : par sécurité, l’app ne retient que des cotes d’au moins ${odd((c.minOdd || 1.01) + EST_MARGIN)}. Vérifiez la cote dans l’appli avant de jouer.</p>`;
-  if (!options.length) return `<p class="defi-empty">Aucun pari des ${all.length} matchs à venir ne respecte ces cotes.</p>`;
+  if (!options.length) return `<p class="defi-empty">Aucun pari des ${all.length} matchs à venir ou en cours ne respecte ces cotes.</p>`;
   if (c.kind !== 'combo') {
     const top = options.slice(0, 5).map(o => o[0]);
     return `<p class="defi-sub">Top ${top.length} des paris qui remplissent la condition au plus juste</p>
-      <ol class="tickets">${top.map(defiRow).join('')}</ol>${estNote}${valueBlock(c, top[0].b.p, top[0].o.v)}`;
+      <ol class="tickets">${top.map(row).join('')}</ol>${estNote}${liveNote(top)}${valueBlock(c, top[0].b.p, top[0].o.v)}`;
   }
   const best = bestCombo(options, c.legs, c.minTotal);
   if (!best) return `<p class="defi-empty">Pas assez de matchs compatibles (${options.length}) pour un combiné de ${c.legs} sélections.</p>`;
   const spare = options.filter(o => !best.sel.some(x => x.m.id === o[0].m.id)).slice(0, 3).map(o => o[0]);
   return `<div class="combo"><div class="combo-head"><span>Combiné conseillé · ${best.sel.length} sélections</span><span class="combo-num">${pct(best.p)} · cote ${best.real ? '' : '≈ '}${odd(best.o)}</span></div>
-      <p class="hint">Le moins de sélections possible pour remplir la condition, chacune la plus probable. À placer avant le premier match.</p></div>
-    <ol class="tickets">${best.sel.map(defiRow).join('')}</ol>
-    ${spare.length ? `<p class="defi-sub">Remplaçants si une cote a bougé</p><ol class="tickets">${spare.map(defiRow).join('')}</ol>` : ''}
-    ${estNote}${valueBlock(c, best.p, best.o)}`;
+      <p class="hint">Le moins de sélections possible pour remplir la condition, chacune la plus probable. ${best.sel.some(x => x.m.liveA) ? 'Contient des matchs en cours : à placer tout de suite.' : 'À placer avant le premier match.'}</p></div>
+    <ol class="tickets">${best.sel.map(row).join('')}</ol>
+    ${spare.length ? `<p class="defi-sub">Remplaçants si une cote a bougé</p><ol class="tickets">${spare.map(row).join('')}</ol>` : ''}
+    ${estNote}${liveNote([...best.sel, ...spare])}${valueBlock(c, best.p, best.o)}`;
 }
+
+const thumbsOf = d => d.thumbs || (d.thumb ? [d.thumb] : []);
 
 function defiCard(d) {
   const reading = defiUi.reading.get(d.id);
+  const thumbs = thumbsOf(d);
   const head = `<div class="defi-head">
-      ${d.thumb ? `<img src="${d.thumb}" alt="" class="defi-thumb">` : ''}
+      <div class="defi-thumbs">${thumbs.map(t => `<img src="${t}" alt="" class="defi-thumb">`).join('')}
+        ${reading == null && thumbs.length < MAX_SHOTS ? `<button type="button" class="defi-more" data-add-to="${esc(d.id)}" aria-label="Ajouter une 2e capture à ce défi">+<small>2e capture</small></button>` : ''}</div>
       <div class="defi-cond">${reading != null
         ? `<b>Lecture de la capture… ${Math.round(reading * 100)} %</b>`
         : d.error ? `<b class="warn">${esc(d.error)}</b>`
@@ -319,8 +356,8 @@ function defiCard(d) {
     </div>`;
   if (reading != null || d.error) return `<article class="defi-card">${head}</article>`;
   const unsure = !d.c.minOdd && !d.c.minTotal
-    ? '<p class="hint warn">Aucune cote minimum trouvée sur la capture : l’app propose les paris les plus sûrs. Si le défi impose une cote, refaites une capture plus nette du texte des conditions.</p>' : '';
-  return `<article class="defi-card">${head}${unsure}${defiResults(d.c)}</article>`;
+    ? `<p class="hint warn">Aucune cote minimum trouvée sur la capture : l’app propose les paris les plus sûrs. Si le défi impose une cote, ${thumbs.length < MAX_SHOTS ? 'ajoutez une 2e capture avec la suite des conditions (bouton +) ou ' : ''}refaites une capture plus nette du texte des conditions.</p>` : '';
+  return `<article class="defi-card">${head}${unsure}${defiResults(d.c, d.id)}</article>`;
 }
 
 function renderDefis() {
@@ -360,32 +397,44 @@ function titleOf(text) {
   return line ? line.slice(0, 60) : 'Défi';
 }
 
-async function addCaptures(files) {
-  const imgs = [...files].filter(f => f.type.startsWith('image/'));
+// Un défi = 1 ou 2 captures (quand les conditions ne tiennent pas sur un seul écran).
+// Sans toId : nouveau défi avec les 2 premières images. Avec toId : 2e capture d'un défi existant.
+const MAX_SHOTS = 2;
+async function addCaptures(files, toId = null) {
+  let imgs = [...files].filter(f => f && f.type.startsWith('image/'));
   if (!imgs.length) return;
-  for (const file of imgs) {
-    const id = `d${Date.now()}${Math.random().toString(36).slice(2, 6)}`;
-    const d = { id, thumb: await thumbnail(file), c: parseDefi(''), at: Date.now() };
-    saveDefis([d, ...loadDefis()]);
-    defiUi.reading.set(id, 0);
-    renderDefis();
-    try {
-      const text = await readImage(file, p => { defiUi.reading.set(id, p); renderDefis(); });
-      const leagues = [...new Set(defiMatches().map(m => m.league))];
-      Object.assign(d, { text: text.slice(0, 2000), title: titleOf(text), c: parseDefi(text, leagues) });
-    } catch (e) {
-      d.error = e.message || 'Impossible de lire cette capture.';
+  const old = toId ? loadDefis().find(x => x.id === toId) : null;
+  const room = MAX_SHOTS - (old ? thumbsOf(old).length : 0);
+  if (room <= 0) { toast(`${MAX_SHOTS} captures maximum par défi`); return; }
+  if (imgs.length > room) { toast(`${MAX_SHOTS} captures maximum par défi : ${room === 1 ? 'seule la première est utilisée' : `seules les ${room} premières sont utilisées`}`); imgs = imgs.slice(0, room); }
+  const id = old?.id || `d${Date.now()}${Math.random().toString(36).slice(2, 6)}`;
+  const thumbs = [...(old ? thumbsOf(old) : []), ...await Promise.all(imgs.map(thumbnail))];
+  const d = { ...(old || { c: parseDefi(''), at: Date.now() }), id, thumbs };
+  delete d.thumb;
+  delete d.error;
+  saveDefis(old ? loadDefis().map(x => (x.id === id ? d : x)) : [d, ...loadDefis()]);
+  defiUi.reading.set(id, 0);
+  renderDefis();
+  try {
+    const texts = [...(old?.texts || (old?.text ? [old.text] : []))];
+    for (const [k, file] of imgs.entries()) {
+      texts.push((await readImage(file, p => { defiUi.reading.set(id, (k + p) / imgs.length); renderDefis(); })).slice(0, 2000));
     }
-    defiUi.reading.delete(id);
-    saveDefis(loadDefis().map(x => (x.id === id ? d : x)));
-    renderDefis();
+    const text = texts.join('\n');
+    const leagues = [...new Set(defiMatches().map(m => m.league))];
+    Object.assign(d, { texts, text, title: titleOf(text), c: parseDefi(text, leagues) });
+  } catch (e) {
+    d.error = e.message || 'Impossible de lire cette capture.';
   }
+  defiUi.reading.delete(id);
+  saveDefis(loadDefis().map(x => (x.id === id ? d : x)));
+  renderDefis();
 }
 
 function bindDefis() {
   const input = $('#defi-file');
-  $('#defi-add').addEventListener('click', () => input.click());
-  input.addEventListener('change', () => { addCaptures(input.files); input.value = ''; });
+  $('#defi-add').addEventListener('click', () => { defiUi.target = null; input.click(); });
+  input.addEventListener('change', () => { addCaptures(input.files, defiUi.target); defiUi.target = null; input.value = ''; });
   // Ordinateur : coller une capture (Ctrl+V) quand l'onglet Défis est ouvert
   document.addEventListener('paste', e => {
     if (ui.tab !== 'defis') return;
@@ -395,15 +444,8 @@ function bindDefis() {
   $('#defi-list').addEventListener('click', e => {
     const del = e.target.closest('[data-del-defi]');
     if (del) { saveDefis(loadDefis().filter(d => d.id !== del.dataset.delDefi)); renderDefis(); return; }
-    const b = e.target.closest('[data-goto-match]');
-    if (!b) return;
-    // Ouvre le match dans l'onglet Matchs (en changeant de journée si besoin)
-    const off = b.dataset.dayOf === dayKey(new Date()) ? 0 : 1;
-    if (ui.dayOffset !== off) { ui.dayOffset = off; saveUi(); loadCached(); }
-    setTab('matchs');
-    ui.sport = 'all'; ui.status = 'all'; ui.query = ''; $('#search').value = '';
-    ui.open.add(b.dataset.gotoMatch);
-    render();
-    document.querySelector(`.match[data-id="${CSS.escape(b.dataset.gotoMatch)}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const more = e.target.closest('[data-add-to]');
+    if (more) { defiUi.target = more.dataset.addTo; input.click(); return; }
+    onPeekClick(e); // détail du match ouvert sur place
   });
 }

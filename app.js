@@ -138,6 +138,8 @@ function parseTeam(c, ranks) {
       logo: c.athlete.flag?.href, country: c.athlete.flag?.alt,
       rank: r?.rank, rankPts: r?.points ?? ranks?.floor ?? 400,
       winner: c.winner, sets: c.linescores?.filter(l => l.winner).length,
+      // Jeux de chaque set (+ points du tie-break), pour l'affichage façon site de scores
+      games: c.linescores?.map(l => ({ v: l.value, tb: l.tiebreak, w: !!l.winner })),
     };
   }
   const t = c.team || {};
@@ -153,7 +155,8 @@ function toMatch(src, ev, comp, ranks, extra = {}) {
   const home = cs.find(c => c.homeAway === 'home') || cs[0];
   const away = cs.find(c => c.homeAway === 'away') || cs[1];
   if (!home || !away) return null;
-  const st = (comp.status || ev.status || {}).type || {};
+  const status = comp.status || ev.status || {};
+  const st = status.type || {};
   return {
     id: `${src.path}:${comp.id || ev.id}`,
     eventId: ev.id,
@@ -166,6 +169,7 @@ function toMatch(src, ev, comp, ranks, extra = {}) {
     state: st.state || 'pre',
     canceled: /POSTPONED|CANCELED|CANCELLED|SUSPENDED/.test(st.name || ''),
     detail: st.shortDetail || st.detail || '',
+    clock: status.clock, period: status.period, // temps de jeu, pour l'estimation en direct
     neutral: !!comp.neutralSite,
     home: parseTeam(home, ranks),
     away: parseTeam(away, ranks),
@@ -585,6 +589,7 @@ const ui = {
   status: store.get('pdj-ui', {}).status || 'upcoming',
   query: '',
   open: new Set(),
+  peek: new Set(), // détails ouverts directement dans un top (« top:id », « idDuDéfi:id »)
   loadingLineup: new Set(),
   data: null,
   tab: store.get('pdj-ui', {}).tab === 'defis' ? 'defis' : 'matchs',
@@ -786,9 +791,9 @@ async function liveTick() {
       if (!f) return base;
       // On ne reprend que l'état du match : les données d'avant-match restent celles du jour
       return {
-        ...base, state: f.state, detail: f.detail, canceled: f.canceled, date: f.date,
-        home: { ...base.home, score: f.home.score, winner: f.home.winner, sets: f.home.sets },
-        away: { ...base.away, score: f.away.score, winner: f.away.winner, sets: f.away.sets },
+        ...base, state: f.state, detail: f.detail, canceled: f.canceled, date: f.date, clock: f.clock, period: f.period,
+        home: { ...base.home, score: f.home.score, winner: f.home.winner, sets: f.home.sets, games: f.home.games },
+        away: { ...base.away, score: f.away.score, winner: f.away.winner, sets: f.away.sets, games: f.away.games },
       };
     });
     if (lineupsDue) await autoDeep(matches);
@@ -895,11 +900,25 @@ function teamLine(t, m) {
   if (m.sport === 'tennis') side = t.rank ? `<span class="tag">n°${t.rank}</span>` : '<span class="tag dim">NC</span>';
   else if (t.form) side = `<span class="form" aria-label="Forme récente">${[...t.form].slice(-5).map(c => `<i class="f-${c.toUpperCase()}"></i>`).join('')}</span>`;
   const score = m.state === 'pre' ? '' : m.sport === 'tennis' ? (t.sets ?? '') : (t.score ?? '');
+  const games = m.sport === 'tennis' && m.state !== 'pre' && t.games?.length ? tennisGames(t, m) : '';
   return `<div class="team${t.winner ? ' won' : ''}">
     ${t.logo ? `<img src="${esc(t.logo)}" alt="" loading="lazy" width="22" height="22">` : '<span class="nologo"></span>'}
     <span class="tname">${esc(t.name)}</span>${side}
-    ${score !== '' ? `<b class="score">${esc(score)}</b>` : ''}
+    ${games || (score !== '' ? `<b class="score">${esc(score)}</b>` : '')}
   </div>`;
+}
+
+// Tennis : sets gagnés puis jeux de chaque set (tie-break du perdant en exposant), set en cours surligné.
+function tennisGames(t, m) {
+  const other = t === m.home ? m.away : m.home;
+  const cells = t.games.map((g, i) => {
+    const o = other.games?.[i];
+    const done = g.w || o?.w;
+    const tb = done && !g.w && g.tb != null ? `<sup>${g.tb}</sup>` : '';
+    const cls = !done && m.state === 'in' ? 'cur' : g.w ? 'won' : '';
+    return `<span class="g ${cls}">${g.v ?? 0}${tb}</span>`;
+  }).join('');
+  return `<span class="tgames" aria-label="Sets ${t.sets ?? 0}, jeux ${t.games.map(g => g.v ?? 0).join(' ')}"><b class="score">${t.sets ?? 0}</b>${cells}</span>`;
 }
 
 function verdict(m) {
@@ -959,17 +978,40 @@ function oddCell(o, fair) {
   return `<td class="n ${o.real ? '' : 'est'}${value ? ' value' : ''}">${o.real ? '' : '≈'}${odd(o.v)}</td>`;
 }
 
-function matchCard(m) {
-  const { best, bets, reliability, text } = m.analysis;
-  const open = ui.open.has(m.id);
-  const when = m.canceled ? 'Reporté' : m.state === 'pre' ? timeOf(m.date) : m.state === 'in' ? esc(m.detail || 'En cours') : 'Terminé';
+// Détail d'un match : analyse, compos/stats, tableau des paris. Sert dans la liste et dans les tops
+// (a : analyse à afficher, par exemple l'estimation en direct ; deep : bouton compos / stats).
+function matchDetails(m, { a = m.analysis, deep = true, hl = null } = {}) {
+  const { best, bets, text } = a;
   const lineupBadge = m.lineup?.status === 'official' ? '<span class="badge">Compos officielles</span>' : '';
+  const mark = hl || best;
+  const same = b => b === mark || (b.type === mark.type && b.side === mark.side && b.line === mark.line);
+  const rows = [...bets].sort((x, y) => y.p - x.p).map(b => `<tr${same(b) ? ' class="is-best"' : ''}>
+      <td>${esc(b.label)}</td><td class="n">${pct(b.p)}</td><td class="n">${odd(b.fair)}</td>
+      ${oddCell(b.odds.betclic, b.fair)}${oddCell(b.odds.winamax, b.fair)}</tr>`).join('');
+  return `<div class="details">
+      ${a.live ? '<span class="badge live">Estimation en direct</span>' : lineupBadge}
+      <ul class="analysis">${text.map(t => `<li>${esc(t)}</li>`).join('')}</ul>
+      ${deep && !a.live ? deepBlock(m) : ''}
+      <div class="table-wrap"><table>
+        <thead><tr><th>Pari</th><th class="n">Proba</th><th class="n">Cote juste</th><th class="n">Betclic</th><th class="n">Winamax</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>
+      <p class="hint">« Cote juste » : à partir de cette cote, le pari est rentable selon notre estimation. Une cote précédée de ≈ est estimée (marge habituelle du bookmaker) : vérifiez la cote réelle dans l’appli Betclic ou Winamax. En vert : vraie cote supérieure à la cote juste.</p>
+    </div>`;
+}
+
+// Ligne des équipes et score, en petit, pour le détail ouvert depuis un top
+function peekHead(m) {
+  return `<div class="peek-head"><span class="teams">${teamLine(m.home, m)}${teamLine(m.away, m)}</span></div>`;
+}
+
+function matchCard(m) {
+  const { best, reliability } = m.analysis;
+  const open = ui.open.has(m.id);
+  const when = m.canceled ? 'Reporté' : m.state === 'pre' ? timeOf(m.date)
+    : m.state === 'in' ? (m.sport === 'tennis' && m.period ? `Set ${m.period}` : esc(m.detail || 'En cours')) : 'Terminé';
   const pick = m.state === 'pre' && !m.canceled
     ? `<div class="pick"><span class="pick-label">${esc(best.label)}</span><span class="pick-p">${pct(best.p)}</span>${oddTag(best)}</div>`
     : verdict(m) || `<div class="pick muted"><span class="pick-label">${esc(best.label)}</span><span class="pick-p">${pct(best.p)}</span></div>`;
-  const rows = [...bets].sort((a, b) => b.p - a.p).map(b => `<tr${b === best ? ' class="is-best"' : ''}>
-      <td>${esc(b.label)}</td><td class="n">${pct(b.p)}</td><td class="n">${odd(b.fair)}</td>
-      ${oddCell(b.odds.betclic, b.fair)}${oddCell(b.odds.winamax, b.fair)}</tr>`).join('');
   return `<article class="match${open ? ' open' : ''}" data-id="${esc(m.id)}">
     <button class="match-head" aria-expanded="${open}">
       <span class="when ${m.state}">${when}${m.round ? `<small>${esc(m.round)}</small>` : ''}</span>
@@ -977,15 +1019,7 @@ function matchCard(m) {
       ${bars(reliability)}
     </button>
     ${pick}
-    ${open ? `<div class="details">
-      ${lineupBadge}
-      <ul class="analysis">${text.map(t => `<li>${esc(t)}</li>`).join('')}</ul>
-      ${deepBlock(m)}
-      <div class="table-wrap"><table>
-        <thead><tr><th>Pari</th><th class="n">Proba</th><th class="n">Cote juste</th><th class="n">Betclic</th><th class="n">Winamax</th></tr></thead>
-        <tbody>${rows}</tbody></table></div>
-      <p class="hint">« Cote juste » : à partir de cette cote, le pari est rentable selon notre estimation. Une cote précédée de ≈ est estimée (marge habituelle du bookmaker) : vérifiez la cote réelle dans l’appli Betclic ou Winamax. En vert : vraie cote supérieure à la cote juste.</p>
-    </div>` : ''}
+    ${open ? matchDetails(m) : ''}
   </article>`;
 }
 
@@ -998,16 +1032,21 @@ function renderTop(all) {
   const comboP = combo.reduce((s, m) => s * m.analysis.best.p, 1);
   const comboOdd = combo.reduce((s, m) => s * m.analysis.best.bestOdd.v, 1);
   const comboReal = combo.every(m => m.analysis.best.bestOdd.real);
-  $('#top-list').innerHTML = picks.map((m, i) => `<li>
-      <button class="ticket" data-goto="${esc(m.id)}">
+  $('#top-list').innerHTML = picks.map((m, i) => {
+    const key = `top:${m.id}`;
+    const open = ui.peek.has(key);
+    return `<li class="peek${open ? ' open' : ''}">
+      <button class="ticket" data-peek="${esc(key)}" aria-expanded="${open}">
         <span class="t-rank">${i + 1}</span>
         <span class="t-body">
           <span class="t-match">${esc(m.home.short)} – ${esc(m.away.short)}</span>
           <span class="t-meta">${timeOf(m.date)} · ${esc(Engine.SPORT_CFG[m.sport].label)} · ${esc(m.league)}</span>
           <span class="t-bet">${esc(m.analysis.best.label)}</span>
+          <span class="t-more">${open ? 'Masquer le détail' : 'Voir le détail et les stats'}</span>
         </span>
         <span class="t-num"><b>${pct(m.analysis.best.p)}</b>${oddTag(m.analysis.best)}</span>
-      </button></li>`).join('');
+      </button>${open ? `<div class="peek-body">${peekHead(m)}${matchDetails(m)}</div>` : ''}</li>`;
+  }).join('');
   const c = $('#combo');
   if (combo.length >= 2) {
     c.hidden = false;
@@ -1124,17 +1163,18 @@ function bind() {
     if (ui.open.has(id)) ui.open.delete(id); else ui.open.add(id);
     render();
   });
-  $('#top-list').addEventListener('click', e => {
-    const b = e.target.closest('[data-goto]');
-    if (!b) return;
-    ui.sport = 'all';
-    ui.status = 'all';
-    ui.query = '';
-    $('#search').value = '';
-    ui.open.add(b.dataset.goto);
-    render();
-    document.querySelector(`.match[data-id="${CSS.escape(b.dataset.goto)}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  });
+  $('#top-list').addEventListener('click', onPeekClick);
+}
+
+// Top 5 (Matchs et Défis) : un appui ouvre le détail du match sur place, sans quitter le top.
+function onPeekClick(e) {
+  const lu = e.target.closest('[data-lineup]');
+  if (lu) { refreshDeep(lu.dataset.lineup); return; }
+  const b = e.target.closest('[data-peek]');
+  if (!b) return;
+  const k = b.dataset.peek;
+  if (ui.peek.has(k)) ui.peek.delete(k); else ui.peek.add(k);
+  render();
 }
 
 // Démarrage une fois tous les scripts chargés (defis.js est chargé après ce fichier).
