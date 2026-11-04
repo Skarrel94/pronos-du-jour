@@ -307,3 +307,54 @@ td.value { color: var(--ok); font-weight: 600; background: color-mix(in srgb, va
   .refresh.busy svg { animation: none; }
   * { scroll-behavior: auto !important; }
 }
+
+/* ---------- Onglets ---------- */
+.tabs { display: flex; gap: 4px; border-bottom: 2px solid var(--line); }
+.tabs button {
+  border: 0; background: none; color: var(--ink-2); padding: 10px 14px 9px; margin-bottom: -2px;
+  font: 700 17px/1 var(--font-display); text-transform: uppercase; letter-spacing: .02em;
+  border-bottom: 3px solid transparent; min-height: 44px;
+}
+.tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+
+/* ---------- Défis freebets ---------- */
+.defis { display: flex; flex-direction: column; gap: 12px; }
+.defis h2, .defi-results h2 { margin: 0; font: 700 22px/1.1 var(--font-display); text-transform: uppercase; }
+.defi-form {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(135px, 1fr)); gap: 10px 12px; align-items: end;
+  background: var(--surface); border-radius: var(--r); padding: 14px;
+}
+.defi-form label { display: flex; flex-direction: column; gap: 4px; font-weight: 600; font-size: 13px; }
+.defi-form label small { font-weight: 400; color: var(--ink-2); }
+.defi-form input, .defi-form select {
+  border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 8px;
+  padding: 8px 10px; font: 500 14px var(--font-num); min-height: 40px; width: 100%;
+}
+.defi-form label.check { flex-direction: row; align-items: center; gap: 8px; grid-column: 1 / -1; font-weight: 500; }
+.defi-form label.check input { width: 20px; min-height: 20px; accent-color: var(--accent); }
+.defi-form .ghost { justify-self: start; }
+.defi-form [hidden] { display: none; }
+.traps { background: var(--surface); border-radius: var(--r); padding: 10px 14px; font-size: 14px; }
+.traps summary { font-weight: 600; cursor: pointer; min-height: 28px; }
+.traps ul { margin: 8px 0 2px; padding-left: 20px; display: flex; flex-direction: column; gap: 5px; }
+.defi-results { display: flex; flex-direction: column; gap: 10px; }
+.defi-sub { margin: 6px 0 0; font: 700 17px/1.1 var(--font-display); text-transform: uppercase; color: var(--ink-2); }
+.defi-results .meta, .defi-results .hint { margin: 0; }
+.defi-value { border-radius: var(--r); padding: 12px 14px; background: var(--surface); border-left: 4px solid var(--draw); font-size: 14px; }
+.defi-value.ok { border-left-color: var(--ok); }
+.defi-value.ko { border-left-color: var(--ko); }
+.defi-value ul { margin: 6px 0; padding-left: 18px; }
+.defi-verdict { margin: 0; font: 700 18px/1.2 var(--font-display); text-transform: uppercase; }
+.defi-value.ok .defi-verdict { color: var(--ok); }
+.defi-value.ko .defi-verdict { color: var(--ko); }
+
+/* ---------- Revenir en haut ---------- */
+.to-top {
+  position: fixed; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); z-index: 9;
+  width: 48px; height: 48px; border-radius: 50%; border: 0;
+  background: var(--accent); color: var(--accent-ink); display: grid; place-items: center;
+  box-shadow: 0 6px 18px rgb(0 0 0 / .28); cursor: pointer;
+}
+.to-top[hidden] { display: none; }
+#view-matchs { display: flex; flex-direction: column; gap: 18px; }
+#view-matchs[hidden], .defis[hidden] { display: none; }

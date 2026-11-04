@@ -1,7 +1,7 @@
 // Service worker : garde l'application disponible hors connexion.
 // Les données des matchs ne passent pas par ici (elles sont gardées par l'app elle-même).
-const CACHE = 'pdj-v3';
-const SHELL = ['./', 'index.html', 'styles.css', 'engine.js', 'app.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
+const CACHE = 'pdj-v4';
+const SHELL = ['./', 'index.html', 'styles.css', 'engine.js', 'app.js', 'defis.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));

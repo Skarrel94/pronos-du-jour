@@ -62,7 +62,6 @@ const SOURCES = [
   soccer('esp.w.1', 'Liga F (féminin)', null, true),
   { path: 'basketball/nba', sport: 'basketball', league: 'NBA', odds: 'basketball_nba' },
   { path: 'basketball/wnba', sport: 'basketball', league: 'WNBA', odds: 'basketball_wnba', total: 164, sd: 11, minor: true },
-  { path: 'basketball/mens-college-basketball', sport: 'basketball', league: 'NCAA Basket', odds: 'basketball_ncaab', total: 145, sd: 11, home: 0.35, minor: true },
   { path: 'tennis/atp', sport: 'tennis', league: 'ATP', tour: 'atp' },
   { path: 'tennis/wta', sport: 'tennis', league: 'WTA', tour: 'wta' },
   { path: 'hockey/nhl', sport: 'hockey', league: 'NHL', odds: 'icehockey_nhl' },
@@ -526,7 +525,7 @@ function rememberPicks(matches) {
     if (m.canceled) continue;
     if (m.state === 'pre') {
       const { best } = m.analysis;
-      preds[m.id] = { type: best.type, side: best.side, line: best.line, label: best.label, p: best.p, day: dayKey(new Date(m.date)) };
+      preds[m.id] = { type: best.type, side: best.side, line: best.line, label: best.label, p: best.p, day: dayKey(new Date(m.date)), path: m.src.path };
     } else if (m.state === 'post' && preds[m.id] && !(m.id in hist)) {
       const won = Engine.settle(preds[m.id], resultOf(m));
       hist[m.id] = { won, p: preds[m.id].p, day: preds[m.id].day };
@@ -535,6 +534,31 @@ function rememberPicks(matches) {
   // On ne garde que 60 jours
   const limit = dayKey(new Date(Date.now() - 60 * 864e5));
   for (const o of [preds, hist]) for (const k in o) if (o[k].day < limit) delete o[k];
+  store.set('pdj-preds', preds);
+  store.set('pdj-history', hist);
+}
+
+// Retire partout (journées gardées, pronos, bilan) les compétitions qui ne sont plus suivies,
+// par exemple la NCAA Basket, absente de Betclic et Winamax.
+function purgeRemovedLeagues() {
+  const removed = new Set();
+  const known = p => SRC_BY_PATH.has(p);
+  try {
+    for (const k of Object.keys(localStorage).filter(k => k.startsWith('pdj-v2-day-'))) {
+      const c = store.get(k, null);
+      if (!c?.matches) continue;
+      const keep = c.matches.filter(m => known(m.src?.path));
+      if (keep.length === c.matches.length) continue;
+      c.matches.filter(m => !known(m.src?.path)).forEach(m => removed.add(m.id));
+      store.set(k, { ...c, matches: keep });
+    }
+  } catch { /* stockage indisponible */ }
+  const preds = store.get('pdj-preds', {});
+  const hist = store.get('pdj-history', {});
+  for (const id of Object.keys(preds)) {
+    if (removed.has(id) || (preds[id].path && !known(preds[id].path))) { removed.add(id); delete preds[id]; }
+  }
+  for (const id of removed) delete hist[id];
   store.set('pdj-preds', preds);
   store.set('pdj-history', hist);
 }
@@ -563,6 +587,7 @@ const ui = {
   open: new Set(),
   loadingLineup: new Set(),
   data: null,
+  tab: store.get('pdj-ui', {}).tab === 'defis' ? 'defis' : 'matchs',
 };
 
 function selectedDay() {
@@ -576,7 +601,7 @@ const withAnalysis = m => ({ ...m, analysis: Engine.analyze(m) });
 
 function loadCached() {
   const c = store.get(cacheKey(selectedDay()), null);
-  ui.data = c ? { ...c, matches: c.matches.map(withAnalysis) } : null;
+  ui.data = c ? { ...c, matches: c.matches.filter(m => SRC_BY_PATH.has(m.src?.path)).map(withAnalysis) } : null;
 }
 
 // Réenregistre la journée (sans les analyses, recalculées à l'ouverture).
@@ -665,11 +690,30 @@ function estimateCost() {
   return Math.min(settings().maxCredits, [...groups.values()].reduce((a, b) => a + b, 0));
 }
 
+// Demande toujours une confirmation avant de dépenser des crédits The Odds API.
+function confirmCredits(cost) {
+  const d = $('#confirm-odds');
+  const c = store.get('pdj-credits', null);
+  const max = settings().maxCredits;
+  $('#confirm-text').innerHTML = `Cette actualisation va utiliser <b>jusqu’à ${cost} crédit${cost > 1 ? 's' : ''}</b> The Odds API`
+    + ` (limite réglée : ${max} par actualisation).<br>`
+    + (c ? `Crédits restants ce mois-ci : <b>${c.remaining}</b> (relevé le ${new Date(c.at).toLocaleDateString('fr-FR')} à ${timeOf(new Date(c.at).toISOString())}).`
+      : 'Crédits restants : inconnus pour l’instant, ils seront affichés après ce chargement.');
+  return new Promise(resolve => {
+    d.returnValue = 'cancel';
+    d.addEventListener('close', () => resolve(d.returnValue === 'ok'), { once: true });
+    d.showModal();
+  });
+}
+
 // Vraies cotes Betclic / Winamax : seul bouton qui utilise des crédits The Odds API.
 async function loadOdds() {
   const btn = $('#odds-btn');
   if (btn.disabled) return;
   if (!ui.data) { toast('Mettez d’abord les matchs à jour.'); return; }
+  const cost = estimateCost();
+  if (!cost) { toast('Aucun match à venir dont les cotes peuvent être chargées.'); return; }
+  if (!(await confirmCredits(cost))) return;
   setBusy(btn, true);
   try {
     const res = await fetchBooks(ui.data.matches, selectedDay(), t => { btn.textContent = t; });
@@ -975,6 +1019,7 @@ function renderTop(all) {
 
 function render() {
   renderHeader();
+  renderDefis();
   renderRecord();
   renderChips();
   const list = $('#list');
@@ -1023,7 +1068,17 @@ function saveSettings(e) {
   render();
 }
 
-function saveUi() { store.set('pdj-ui', { dayOffset: ui.dayOffset, status: ui.status }); }
+function saveUi() { store.set('pdj-ui', { dayOffset: ui.dayOffset, status: ui.status, tab: ui.tab }); }
+
+// Onglets « Matchs » et « Défis freebets »
+function setTab(tab) {
+  ui.tab = tab;
+  saveUi();
+  document.querySelectorAll('[data-tab]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
+  $('#view-matchs').hidden = tab !== 'matchs';
+  $('#view-defis').hidden = tab !== 'defis';
+  render();
+}
 
 function bind() {
   $('#refresh').addEventListener('click', update);
@@ -1033,6 +1088,14 @@ function bind() {
   $('#odds-hint-open').addEventListener('click', openSettings);
   $('#settings-form').addEventListener('submit', saveSettings);
   $('#settings-cancel').addEventListener('click', () => $('#settings').close());
+  $('#confirm-cancel').addEventListener('click', () => $('#confirm-odds').close('cancel'));
+  document.querySelectorAll('[data-tab]').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));
+  // Bouton « revenir en haut », visible dès qu'on a fait défiler la page
+  const toTop = $('#to-top');
+  const onScroll = () => { toTop.hidden = window.scrollY < 500; };
+  window.addEventListener('scroll', onScroll, { passive: true });
+  toTop.addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
+  onScroll();
   document.querySelectorAll('[data-day]').forEach(b => b.addEventListener('click', () => {
     ui.dayOffset = Number(b.dataset.day);
     ui.open.clear();
@@ -1074,9 +1137,14 @@ function bind() {
   });
 }
 
-bind();
-loadCached();
-render();
+// Démarrage une fois tous les scripts chargés (defis.js est chargé après ce fichier).
+document.addEventListener('DOMContentLoaded', () => {
+  purgeRemovedLeagues();
+  bind();
+  bindDefis();
+  loadCached();
+  setTab(ui.tab);
+});
 setInterval(liveTick, LIVE_MS);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) liveTick(); });
 

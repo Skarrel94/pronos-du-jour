@@ -56,6 +56,12 @@
     <button id="odds-hint-open" type="button">Ajouter une clé</button>
   </div>
 
+  <nav class="tabs" role="tablist" aria-label="Sections">
+    <button type="button" role="tab" data-tab="matchs" aria-controls="view-matchs">Matchs</button>
+    <button type="button" role="tab" data-tab="defis" aria-controls="view-defis">Défis freebets</button>
+  </nav>
+
+  <div id="view-matchs" role="tabpanel">
   <div id="record" class="record" hidden></div>
 
   <section id="top" class="top" hidden aria-labelledby="top-title">
@@ -79,6 +85,55 @@
 
   <div id="empty" class="empty" hidden></div>
   <div id="list"></div>
+  </div>
+
+  <section id="view-defis" class="defis" role="tabpanel" hidden aria-labelledby="defi-title">
+    <h2 id="defi-title">Défis freebets Winamax et Betclic</h2>
+    <p class="meta">Recopiez les conditions du défi affiché dans votre appli. L’app cherche les paris des matchs à venir (aujourd’hui et demain) qui les respectent au plus juste, puis dit si le défi vaut le coup.</p>
+    <form id="defi-form" class="defi-form">
+      <label>Bookmaker
+        <select name="book"><option value="winamax">Winamax</option><option value="betclic">Betclic</option><option value="both">Les deux</option></select>
+      </label>
+      <label>Type de pari
+        <select name="kind"><option value="single">Pari simple</option><option value="combo">Combiné</option></select>
+      </label>
+      <label>Cote minimum par sélection
+        <input name="minOdd" type="number" inputmode="decimal" min="1.01" step="0.01" placeholder="1,10">
+      </label>
+      <label>Cote maximum par sélection <small>(si le défi en impose une)</small>
+        <input name="maxOdd" type="number" inputmode="decimal" min="1.01" step="0.01" placeholder="aucune">
+      </label>
+      <label class="combo-only">Nombre de sélections minimum
+        <input name="legs" type="number" inputmode="numeric" min="2" max="20" step="1">
+      </label>
+      <label class="combo-only">Cote totale minimum
+        <input name="minTotal" type="number" inputmode="decimal" min="1.01" step="0.01" placeholder="aucune">
+      </label>
+      <label>Sport imposé
+        <select name="sport"></select>
+      </label>
+      <label>Mise demandée (€)
+        <input name="stake" type="number" inputmode="decimal" min="0" step="0.5" placeholder="ex. 10">
+      </label>
+      <label>Freebet gagné (€)
+        <input name="freebet" type="number" inputmode="decimal" min="0" step="0.5" placeholder="ex. 5">
+      </label>
+      <label class="check"><input name="onlyIfWon" type="checkbox"> Freebet versé seulement si le pari est gagné</label>
+      <button type="button" id="defi-reset" class="ghost">Réinitialiser</button>
+    </form>
+    <details class="traps">
+      <summary>Pièges à vérifier dans les conditions du défi</summary>
+      <ul>
+        <li><b>Cote minimum par sélection ou totale ?</b> Ce n’est pas la même chose : « combiné à 1,50 » est souvent la cote totale.</li>
+        <li><b>Paris remboursés, annulés ou cash-out</b> : en général ils ne comptent pas, et le défi est perdu.</li>
+        <li><b>Freebet = gain seul</b> : la mise du freebet n’est jamais rendue, 10 € de freebet valent environ 6 à 7 €.</li>
+        <li><b>Date limite</b> du défi et <b>durée de validité</b> du freebet (souvent 7 jours).</li>
+        <li><b>Mise minimum</b>, sports ou compétitions exclus, paris en direct acceptés ou non.</li>
+        <li>Ne misez jamais plus que prévu juste pour débloquer un freebet.</li>
+      </ul>
+    </details>
+    <div id="defi-results" class="defi-results"></div>
+  </section>
 
   <footer class="foot">
     <p><b>18+ · Jouer comporte des risques : endettement, isolement, dépendance.</b> Pour être aidé, appelez le 09 74 75 13 13 (appel non surtaxé).</p>
@@ -107,9 +162,26 @@
   </form>
 </dialog>
 
+<dialog id="confirm-odds" class="sheet" aria-labelledby="confirm-title">
+  <form method="dialog">
+    <h2 id="confirm-title">Utiliser des crédits ?</h2>
+    <p id="confirm-text"></p>
+    <p class="hint">« Mettre à jour », les scores en direct et les compos restent gratuits.</p>
+    <div class="sheet-actions">
+      <button type="button" id="confirm-cancel" class="ghost">Annuler</button>
+      <button type="submit" value="ok" class="primary">Charger les cotes</button>
+    </div>
+  </form>
+</dialog>
+
+<button id="to-top" class="to-top" type="button" aria-label="Revenir en haut de la page" hidden>
+  <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+</button>
+
 <div id="toast" class="toast" role="status" hidden></div>
 
 <script src="engine.js"></script>
 <script src="app.js"></script>
+<script src="defis.js"></script>
 </body>
 </html>
