@@ -59,20 +59,22 @@ const SPORT_WORDS = [
 // Transforme le texte lu en conditions. Tout ce qui n'est pas trouvé garde une valeur prudente.
 function parseDefi(raw, leagues = []) {
   const t = flat(raw).replace(/[«»"“”]/g, ' ').replace(/\s+/g, ' ');
-  const c = { book: 'both', kind: 'single', minOdd: null, minTotal: null, maxOdd: null, legs: 1, stake: null, freebet: null, when: 'won', sport: 'all', league: null, found: [] };
+  const c = { book: 'both', kind: 'single', minOdd: null, minTotal: null, maxOdd: null, legs: 1, stake: null, freebet: null, when: 'won', sport: 'all', league: null, deadline: null, lottery: false, tickets: false, found: [] };
 
   const wina = /winamax/.test(t), betc = /betclic/.test(t);
   if (wina !== betc) c.book = wina ? 'winamax' : 'betclic';
 
-  const legsM = t.match(new RegExp(`(?:au moins|minimum|min\\.?|de|d'au moins)?\\s*(\\d{1,2})\\s*(?:selections?|matchs?|paris|evenements?)\\b`));
-  if (/combin/.test(t) || (legsM && Number(legsM[1]) >= 2)) {
+  const legsM = t.match(/(?<![:\d])(\d{1,2})\s*(?:selections?|matchs?|paris)\b/);
+  // « simple ou combiné » = au choix : un pari simple suffit
+  const free = /(simple ou combine|combine ou simple|simples? et combines?|simple\/combine)/.test(t);
+  if (!free && (/combin/.test(t) || (legsM && Number(legsM[1]) >= 2))) {
     c.kind = 'combo';
     c.legs = legsM ? Math.max(2, Number(legsM[1])) : 2;
   }
 
   // Cotes : « cote minimum de 1,50 », « cote ≥ 1.50 », « à 1,50 minimum », « @1,50 »
   const odds = [];
-  const oddRe = new RegExp(`(cote[s]?(?: totale| globale| du combine| de chaque selection| par selection| minimale| minimum| mini| min\\.?| maximale| maximum| max\\.?| d'au moins| superieure? ou egale? a| superieure? a| de| a|\\s|:|>=|≥|@)*)${DEC}`, 'g');
+  const oddRe = new RegExp(`(cote[s]?(?: totale| globale| du combine| de chaque selection| par selection| par pari| par mise| par ticket| requise| exigee| minimale| minimum| mini| min\\.?| maximale| maximum| max\\.?| d'au moins| superieure? ou egale? a| superieure? a| de| a|\\s|:|>=|≥|@)*)${DEC}`, 'g');
   for (const m of t.matchAll(oddRe)) {
     const v = toNum(m[2]);
     if (v < 1.01 || v > 50) continue;
@@ -101,8 +103,8 @@ function parseDefi(raw, leagues = []) {
     ...amounts(new RegExp(`${DEC}${EURO}\\s?(?:mises?|de mise)\\b`, 'g')),
   ].sort((a, b) => a.at - b.at)[0];
   const fbA = [
-    ...amounts(new RegExp(`(?:freebets?|free bets?|paris? gratuits?|paris? offerts?|bonus|rembourse(?:ra)?(?: \\w+){0,3})\\s?(?:de|d'une valeur de|:|jusqu'a)?\\s?${DEC}${EURO}`, 'g')),
-    ...amounts(new RegExp(`${DEC}${EURO}\\s?(?:de |en |offerts? en )?(?:freebets?|free bets?|paris? gratuits?|paris? offerts?|bonus|cash)`, 'g')),
+    ...amounts(new RegExp(`(?:f?r?ee ?bets?|paris? gratuits?|paris? offerts?|bonus|rembourse(?:ra)?(?: \\w+){0,3})\\s?(?:de|d'une valeur de|:|jusqu'a)?\\s?${DEC}${EURO}`, 'g')),
+    ...amounts(new RegExp(`${DEC}${EURO}\\s?(?:de |en |offerts? en )?(?:f?r?ee ?bets?|paris? gratuits?|paris? offerts?|bonus|cash)`, 'g')),
   ].filter(a => a.at !== stakeA?.at).sort((a, b) => a.at - b.at)[0];
   if (stakeA) c.stake = stakeA.v;
   if (fbA) c.freebet = fbA.v;
@@ -111,6 +113,17 @@ function parseDefi(raw, leagues = []) {
   if (/(perdant|perdu|rembourse|si vous perdez|si tu perds)/.test(t)) c.when = 'lost';
   else if (/(gagnant|gagne|si vous gagnez|si tu gagnes)/.test(t)) c.when = 'won';
   else if (/(quel que soit|peu importe|qu'il soit gagnant ou perdant)/.test(t)) c.when = 'any';
+  // Récompense par tirage au sort, tickets gagnés à chaque pari gagné (ex. « Ticket Mania »)
+  c.lottery = /tirage au sort/.test(t);
+  c.tickets = /tickets?/.test(t) && /(pari gagne|paris gagnes|chaque pari)/.test(t);
+  if (c.lottery) c.when = 'won';
+
+  // Date limite : « … au jeudi 5 novembre 2026 à 01:00 »
+  const MONTHS = ['janvier', 'fevrier', 'mars', 'avril', 'mai', 'juin', 'juillet', 'aout', 'septembre', 'octobre', 'novembre', 'decembre'];
+  const dates = [...t.matchAll(new RegExp(`(\\d{1,2})(?:er)? (${MONTHS.join('|')})(?: (\\d{4}))?(?: a| des)? (\\d{1,2})[:h](\\d{2})`, 'g'))]
+    .map(m => new Date(Number(m[3] || new Date().getFullYear()), MONTHS.indexOf(m[2]), Number(m[1]), Number(m[4]), Number(m[5])))
+    .filter(d => !Number.isNaN(+d));
+  if (dates.length) c.deadline = Math.max(...dates.map(Number));
 
   for (const [sport, re] of SPORT_WORDS) if (re.test(t)) { c.sport = sport; break; }
   const lg = leagues.map(l => [l, flat(l)]).filter(([, n]) => n.length > 5).sort((a, b) => b[1].length - a[1].length)
@@ -131,10 +144,12 @@ function conditionsText(c) {
   if (c.minOdd) parts.push(`cote ≥ ${odd(c.minOdd)}${c.kind === 'combo' ? ' par sélection' : ''}`);
   if (c.minTotal) parts.push(`cote totale ≥ ${odd(c.minTotal)}`);
   if (c.maxOdd) parts.push(`cote ≤ ${odd(c.maxOdd)}`);
+  if (c.deadline) parts.push(`matchs finis avant le ${new Date(c.deadline).toLocaleString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`);
   if (c.league) parts.push(c.league);
   else if (c.sport !== 'all') parts.push(Engine.SPORT_CFG[c.sport]?.label || c.sport);
   if (c.stake) parts.push(`mise ${num2(c.stake)} €`);
-  if (c.freebet) parts.push(`freebet ${num2(c.freebet)} € ${c.when === 'lost' ? 'si perdu' : c.when === 'any' ? 'dans tous les cas' : 'si gagné'}`);
+  if (c.lottery) parts.push(c.tickets ? '1 ticket par pari gagné, freebets par tirage au sort' : 'freebets par tirage au sort');
+  else if (c.freebet) parts.push(`freebet ${num2(c.freebet)} € ${c.when === 'lost' ? 'si perdu' : c.when === 'any' ? 'dans tous les cas' : 'si gagné'}`);
   return parts.join(' · ');
 }
 const num2 = x => String(x).replace('.', ',');
@@ -246,6 +261,13 @@ function defiRow(x, i) {
 }
 
 function valueBlock(c, p, o) {
+  if (c.lottery) {
+    return `<div class="defi-value">
+      <p class="defi-verdict">Récompense par tirage au sort</p>
+      <p>Impossible de chiffrer la valeur du défi : les freebets sont tirés au sort.${c.tickets ? ` Chaque pari gagné donne un ticket : le plus malin est de jouer <b>la mise minimum${c.stake ? ` (${num2(c.stake)} €)` : ''}</b> sur les paris les plus sûrs ci-dessus, un pari par match, pour gagner un maximum de tickets en perdant le moins possible.` : ''}</p>
+      ${c.stake ? `<p class="hint">Coût moyen d’un pari à ${num2(c.stake)} € sur le n° 1 : ${eur(c.stake * (p * o - 1))} (marge du bookmaker), pour ${pct(p)} de chances de gagner un ticket.</p>` : ''}
+    </div>`;
+  }
   const v = defiValue(c, p, o);
   if (!v) return '';
   const ok = v.total > 0;
@@ -261,7 +283,9 @@ function valueBlock(c, p, o) {
 }
 
 function defiResults(c) {
-  const all = defiMatches().filter(m => (c.sport === 'all' || m.sport === c.sport) && (!c.league || m.league === c.league));
+  const DUR = { soccer: 2, tennis: 3, basketball: 2.5, football: 3.5, baseball: 3.5, hockey: 2.75, rugby: 2, mma: 1, afl: 3 };
+  const all = defiMatches().filter(m => (c.sport === 'all' || m.sport === c.sport) && (!c.league || m.league === c.league)
+    && (!c.deadline || new Date(m.date).getTime() + (DUR[m.sport] || 3) * 36e5 <= c.deadline));
   if (!all.length) {
     return `<p class="defi-empty">Aucun match à venir${c.league ? ` en ${esc(c.league)}` : ''} chargé. Appuyez sur <b>Mettre à jour</b> (gratuit) pour aujourd’hui et pour demain.</p>`;
   }
@@ -324,8 +348,15 @@ function thumbnail(file) {
   });
 }
 
+// Titre du défi : son nom s'il apparaît (« Ticket Mania », « Défi … »), sinon la première vraie phrase
+// (on saute la barre d'état du téléphone et les intitulés génériques).
 function titleOf(text) {
-  const line = text.split('\n').map(l => l.trim()).find(l => l.length > 6 && /[a-z]/i.test(l));
+  const named = text.match(/\b(?:fin du|fin de la)\s+([A-ZÀ-Ý][\wÀ-ÿ'’]+(?:\s+[A-ZÀ-Ý][\wÀ-ÿ'’]+){0,3})/)
+    || text.match(/\b((?:D[ée]fi|Challenge|Mission)\b[^\n]{0,40})/i);
+  if (named) return named[1].trim().slice(0, 60);
+  const generic = /^(comment jouer|r[èe]gles|date|r[ée]compense|conditions)\b/i;
+  const line = text.split('\n').map(l => l.trim())
+    .find(l => (l.match(/[a-zà-ÿ]{4,}/gi) || []).length >= 2 && !generic.test(l) && !/^\d{1,2}[:h]\d{2}/.test(l));
   return line ? line.slice(0, 60) : 'Défi';
 }
 
