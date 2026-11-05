@@ -58,16 +58,23 @@
 
   <nav class="tabs" role="tablist" aria-label="Sections">
     <button type="button" role="tab" data-tab="matchs" aria-controls="view-matchs">Matchs</button>
-    <button type="button" role="tab" data-tab="defis" aria-controls="view-defis">Défis freebets</button>
+    <button type="button" role="tab" data-tab="defis" aria-controls="view-defis">Défis &amp; freebets</button>
+    <button type="button" role="tab" data-tab="suivi" aria-controls="view-suivi">Suivi</button>
   </nav>
 
   <div id="view-matchs" role="tabpanel">
   <div id="record" class="record" hidden></div>
 
   <section id="top" class="top" hidden aria-labelledby="top-title">
-    <h2 id="top-title">Les meilleurs paris du jour</h2>
+    <h2 id="top-title">Les paris value du jour</h2>
+    <p id="top-intro" class="meta"></p>
     <ol id="top-list" class="tickets"></ol>
     <div id="combo" class="combo" hidden></div>
+    <div id="top-other-wrap" hidden>
+      <h3 class="sub">Pronos indicatifs (sans value prouvée)</h3>
+      <p class="meta">Les issues les plus probables à une cote correcte. Sans avantage sur la cote juste, ils perdent la marge du bookmaker sur la durée : à jouer petit, ou pas du tout.</p>
+      <ol id="top-other" class="tickets"></ol>
+    </div>
   </section>
 
   <section class="filters" aria-label="Filtres">
@@ -88,8 +95,9 @@
   </div>
 
   <section id="view-defis" class="defis" role="tabpanel" hidden aria-labelledby="defi-title">
-    <h2 id="defi-title">Défis freebets Winamax et Betclic</h2>
+    <h2 id="defi-title">Défis, freebets et cotes boostées</h2>
     <p class="meta">Ajoutez une capture d’écran d’un défi Winamax ou Betclic : l’app lit les conditions toute seule, cherche les paris des matchs à venir (aujourd’hui et demain) ou en cours (cotes live estimées d’après le score) qui les remplissent au plus juste et dit si le défi vaut le coup. Si les conditions ne tiennent pas sur un écran, ajoutez une 2e capture (2 maximum par défi). Les captures restent sur votre téléphone.</p>
+    <div id="defi-tools"></div>
     <button type="button" id="defi-add" class="defi-add">
       <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z M12 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
       Ajouter une capture de défi
@@ -107,6 +115,11 @@
         <li>Ne misez jamais plus que prévu juste pour débloquer un freebet.</li>
       </ul>
     </details>
+  </section>
+
+  <section id="view-suivi" class="suivi" role="tabpanel" hidden aria-labelledby="suivi-title">
+    <h2 id="suivi-title">Suivi de vos paris</h2>
+    <div id="suivi-body"></div>
   </section>
 
   <footer class="foot">
@@ -127,8 +140,25 @@
     <input id="api-key" type="text" autocomplete="off" spellcheck="false" placeholder="ex. 3f9c…">
     <label for="max-credits">Crédits maximum par actualisation</label>
     <input id="max-credits" type="number" min="1" max="100" step="1" inputmode="numeric">
-    <p class="hint">Une compétition coûte 1 à 3 crédits. Avec 15 crédits par jour, l’offre gratuite tient tout le mois. Les compétitions qui ont le plus de matchs passent en premier.</p>
+    <p class="hint">Une compétition coûte 1 à 3 crédits. Avec 15 crédits par jour, l’offre gratuite tient tout le mois. Les compétitions qui ont le plus de matchs passent en premier. Chaque requête lit aussi Unibet, Parions Sport, PMU, NetBet et la cote de référence Pinnacle, sans crédit en plus.</p>
     <p id="credits" class="hint"></p>
+
+    <h2 class="sheet-sub">Mes bookmakers</h2>
+    <p class="hint">La meilleure cote et les paris value sont cherchés uniquement chez les bookmakers cochés (ceux où vous avez un compte).</p>
+    <div id="my-books" class="checks"></div>
+
+    <h2 class="sheet-sub">Bankroll et mises</h2>
+    <label for="bankroll">Bankroll de départ (€)</label>
+    <input id="bankroll" type="text" inputmode="decimal" placeholder="ex. 200">
+    <label for="kelly">Fraction de Kelly</label>
+    <select id="kelly">
+      <option value="0.125">1/8 (très prudent)</option>
+      <option value="0.25">1/4 (conseillé)</option>
+      <option value="0.5">1/2 (agressif)</option>
+    </select>
+    <label for="max-pct">Mise maximum (% de la bankroll)</label>
+    <input id="max-pct" type="text" inputmode="decimal">
+    <p class="hint">Mise conseillée = fraction de Kelly × avantage / (cote − 1), plafonnée. Elle n’est proposée que pour les paris value (comparés à Pinnacle). N’engagez jamais d’argent dont vous avez besoin.</p>
     <div class="sheet-actions">
       <button type="button" id="settings-cancel" class="ghost">Annuler</button>
       <button type="submit" class="primary">Enregistrer</button>
@@ -148,6 +178,27 @@
   </form>
 </dialog>
 
+<dialog id="log-dialog" class="sheet" aria-labelledby="log-title">
+  <form id="log-form">
+    <h2 id="log-title">Noter un pari joué</h2>
+    <p id="log-match" class="hint"></p>
+    <label for="log-bet">Pari</label>
+    <select id="log-bet"></select>
+    <label for="log-book">Bookmaker</label>
+    <select id="log-book"></select>
+    <label for="log-odd">Cote prise</label>
+    <input id="log-odd" type="text" inputmode="decimal" required>
+    <label for="log-stake">Mise (€)</label>
+    <input id="log-stake" type="text" inputmode="decimal" required>
+    <label class="check"><input id="log-freebet" type="checkbox"> Joué avec un freebet (seul le gain est versé)</label>
+    <p id="log-hint" class="hint"></p>
+    <div class="sheet-actions">
+      <button type="button" id="log-cancel" class="ghost">Annuler</button>
+      <button type="submit" class="primary">Enregistrer</button>
+    </div>
+  </form>
+</dialog>
+
 <button id="to-top" class="to-top" type="button" aria-label="Revenir en haut de la page" hidden>
   <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
 </button>
@@ -156,6 +207,7 @@
 
 <script src="engine.js"></script>
 <script src="app.js"></script>
+<script src="suivi.js"></script>
 <script src="defis.js"></script>
 </body>
 </html>

@@ -4,11 +4,15 @@
 // conditions, puis cherche les paris des matchs à venir qui les respectent au plus juste
 // (cote la plus proche du minimum, donc la plus probable) et estime si le défi vaut le coup.
 
-const TESSERACT_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+// Version figée : une mise à jour du CDN ne peut pas changer le code exécuté dans l'app.
+const TESSERACT_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
 // Cote estimée : on garde une marge, la cote réelle peut être un peu plus basse.
 const EST_MARGIN = 0.03;
-// Part moyenne de la valeur d'un freebet réellement récupérée (seul le gain est versé, joué vers 2,5).
-const FREEBET_VALUE = 0.65;
+// Part de la valeur d'un freebet récupérée en moyenne quand aucun match n'est chargé. Seul le gain est
+// versé : un freebet joué à la cote o avec une probabilité p vaut p × (o − 1), soit environ
+// taux de retour − 1/o. Plus la cote est haute, plus il vaut (≈ 52 % à 2,5, ≈ 72 % à 5).
+const FREEBET_VALUE = 0.70;
+const FB_MIN_ODD = 2.5, FB_MAX_ODD = 10;
 const DEFI_KEY = 'pdj-defis';
 // Version de la lecture des conditions : les défis lus avant sont relus automatiquement.
 const PARSE_V = 2;
@@ -191,7 +195,7 @@ function defiMatches() {
   const seen = new Set();
   const today = ui.data?.day === dayKey(new Date()) ? new Set(ui.data.matches.map(m => m.id)) : new Set();
   // (oddsChecked sans cotes : match que Betclic et Winamax ne proposent pas)
-  return out.filter(m => !m.canceled && !(m.oddsChecked && !m.books) && !seen.has(m.id) && seen.add(m.id)).map(m => {
+  return out.filter(m => !m.canceled && offeredInFrance(m) && !seen.has(m.id) && seen.add(m.id)).map(m => {
     if (m.state === 'pre' && new Date(m.date) > soon) return m;
     // En cours : seulement si les scores sont tenus à jour (journée d'aujourd'hui affichée)
     if (m.state === 'in' && today.has(m.id)) {
@@ -206,12 +210,13 @@ function defiMatches() {
 const BOOK_KEYS = ['betclic', 'winamax'];
 
 // Cote du pari chez le bookmaker choisi (« both » : la meilleure des deux).
-// Si les vraies cotes du match sont chargées, seules les vraies cotes comptent : un pari que l'API
-// ne cote pas (les deux marquent, double chance, remboursé si nul…) est alors écarté.
+// Si les vraies cotes d'avant-match du match sont chargées, seules les vraies cotes comptent : un pari
+// que l'API ne cote pas (les deux marquent, double chance…) est alors écarté. En direct, toutes les
+// cotes sont estimées d'après le score : on les garde.
 function bookOdd(b, book, m) {
   const keys = book === 'both' ? BOOK_KEYS : [book];
   const odds = keys.map(k => b.odds[k] && { ...b.odds[k], book: k })
-    .filter(o => o && (!m.books || o.real))
+    .filter(o => o && (!m.books || m.liveA || o.real))
     .sort((x, y) => y.v - x.v);
   return odds[0] || null;
 }
@@ -267,13 +272,33 @@ function bestCombos(options, minLegs, minTotal) {
   return out;
 }
 
-// Le défi vaut-il le coup ? Perte moyenne due à la marge + valeur moyenne du freebet.
+// Meilleures façons de jouer un freebet chez un bookmaker : valeur récupérée p × (o − 1) par euro,
+// sur les matchs à venir, entre 2,5 et 10 de cote. Une cote estimée est comptée 3 % plus bas.
+function freebetOptions(book, matches = defiMatches().filter(m => !m.liveA)) {
+  const out = [];
+  for (const m of matches) {
+    for (const b of m.analysis.bets) {
+      const o = bookOdd(b, book, m);
+      if (!o) continue;
+      const eff = o.real ? o.v : o.v / (1 + EST_MARGIN);
+      if (eff < FB_MIN_ODD || eff > FB_MAX_ODD) continue;
+      out.push({ m, b, o, eff, conv: b.p * (eff - 1) });
+    }
+  }
+  // Un seul pari par match
+  const seen = new Set();
+  return out.sort((x, y) => y.conv - x.conv).filter(x => !seen.has(x.m.id) && seen.add(x.m.id));
+}
+
+// Le défi vaut-il le coup ? Perte moyenne due à la marge + valeur moyenne du freebet
+// (au taux de conversion du meilleur pari disponible pour le jouer, sinon 70 %).
 function defiValue(c, p, o) {
   if (!c.stake || !c.freebet) return null;
   const evStake = c.stake * (p * o - 1);
   const chance = c.when === 'lost' ? 1 - p : c.when === 'any' ? 1 : p;
-  const evFb = c.freebet * FREEBET_VALUE * chance;
-  return { evStake, evFb, chance, total: evStake + evFb };
+  const conv = Math.min(0.85, freebetOptions(c.book)[0]?.conv || FREEBET_VALUE);
+  const evFb = c.freebet * conv * chance;
+  return { evStake, evFb, chance, conv, total: evStake + evFb };
 }
 
 // ---------- Affichage ----------
@@ -347,7 +372,7 @@ function valueBlock(c, p, o, live = false) {
       <li>Pari imposé (marge du bookmaker) : <b>${eur(v.evStake)}</b> en moyenne sur ${num2(c.stake)} €</li>
       <li>Freebet de ${num2(c.freebet)} € : vaut environ <b>${eur(v.evFb)}</b> (${cond})</li>
     </ul>
-    <p class="hint">Un freebet ne rend que le gain, pas la mise : joué sur une cote d’environ 2,5, il rapporte en moyenne 65 % de sa valeur.</p>
+    <p class="hint">Un freebet ne rend que le gain, pas la mise : sa valeur est d’environ ${pct(v.conv)} s’il est joué sur le meilleur pari à cote haute disponible (outil « Convertir un freebet » en haut de l’onglet). Joué vers 1,5, il ne vaut que 30 % environ.</p>
   </div>`;
 }
 
@@ -483,8 +508,77 @@ function defiCard(d) {
   return `<article class="defi-card">${head}${books}${unsure}${defiResults(c, d.id)}</article>`;
 }
 
+// ---------- Outils : convertir un freebet, juger une cote boostée ----------
+const toolUi = { fbAmount: 10, fbBook: 'winamax', boostMatch: '', boostBet: 0, boostOdd: '' };
+
+function fbOutHtml(matches = defiMatches().filter(m => !m.liveA)) {
+  const opts = freebetOptions(toolUi.fbBook, matches).slice(0, 5);
+  const amount = toolUi.fbAmount || 0;
+  const fbOut = !matches.length
+    ? '<p class="defi-empty">Mettez les matchs à jour (aujourd’hui et demain) pour voir où jouer vos freebets.</p>'
+    : opts.length ? `<ol class="tickets">${opts.map((x, i) => `<li><div class="ticket static">
+        <span class="t-rank">${i + 1}</span>
+        <span class="t-body"><span class="t-match">${esc(x.m.home.short)} – ${esc(x.m.away.short)}</span>
+          <span class="t-meta">${dayLabel(x.m.date)}${timeOf(x.m.date)} · ${esc(x.m.league)}</span>
+          <span class="t-bet">${esc(x.b.label)}</span>
+          <span class="t-meta t-info">Valeur récupérée : <b class="good">${pct(x.conv)}</b>${amount ? ` · ≈ ${eur2(amount * x.conv)} en moyenne pour ${eur2(amount)}` : ''}</span></span>
+        <span class="t-num"><b>${pct(x.b.p)}</b>${defiOddTag(x.o)}</span></div></li>`).join('')}</ol>`
+      : '<p class="defi-empty">Aucun pari entre 2,5 et 10 de cote chez ce bookmaker.</p>';
+  return fbOut;
+}
+
+function boostPick(matches) {
+  const upcoming = matches.slice().sort((a, b) => a.date.localeCompare(b.date));
+  const bm = upcoming.find(m => m.id === toolUi.boostMatch) || null;
+  const bets = bm ? [...bm.analysis.bets].sort((x, y) => y.p - x.p) : [];
+  return { upcoming, bm, bets, bb: bets[toolUi.boostBet] || bets[0] };
+}
+
+function boostOutHtml(matches = defiMatches().filter(m => !m.liveA)) {
+  const { bm, bb } = boostPick(matches);
+  const bo = Number(String(toolUi.boostOdd).replace(',', '.'));
+  let boostOut = '<p class="hint">Choisissez le match et le pari boosté, puis tapez la cote boostée.</p>';
+  if (bb && bo > 1) {
+    const ev = bb.p * bo - 1;
+    const kelly = ev > 0 ? ev / (bo - 1) : 0;
+    const s = settings();
+    const stake = kelly > 0 && currentBankroll() > 0 ? Math.floor(currentBankroll() * Math.min(s.maxPct / 100, s.kelly * kelly) * 2) / 2 : 0;
+    const sharp = bb.evSrc === 'sharp' || bm.analysis.model.marketSrc === 'sharp';
+    boostOut = `<div class="defi-value ${ev > 0 ? 'ok' : 'ko'}">
+      <p class="defi-verdict">${ev > 0 ? 'Cote boostée rentable' : 'Cote boostée pas rentable'} : ${ev >= 0 ? '+' : ''}${pct1(ev)} d’espérance</p>
+      <p>Probabilité ${sharp ? 'Pinnacle' : 'estimée par l’app (sans Pinnacle, moins fiable)'} : ${pct(bb.p)}, cote juste ${odd(bb.fair)} contre ${odd(bo)} boostée.${ev > 0 ? ` Pour 10 € misés : ${euro(10 * ev)} en moyenne.${stake ? ` Mise conseillée : <b>${eur2(stake)}</b> (souvent plafonnée par le bookmaker).` : ''}` : ' Le boost ne compense pas la marge : passez votre tour.'}</p>
+    </div>`;
+  }
+  return boostOut;
+}
+
+function renderTools() {
+  const matches = defiMatches().filter(m => !m.liveA);
+  const { upcoming, bm, bets, bb } = boostPick(matches);
+  return `<details class="tools" ${toolUi.open ? 'open' : ''} id="tools">
+    <summary><h3 style="display:inline">Outils freebets et cotes boostées</h3></summary>
+    <h3>Convertir un freebet</h3>
+    <p class="hint">Un freebet ne rend que le gain : il vaut plus sur une cote haute. Voici les paris qui en récupèrent le plus.</p>
+    <div class="tool-row">
+      <label>Montant (€)<input id="fb-amount" type="text" inputmode="decimal" value="${esc(toolUi.fbAmount || '')}"></label>
+      <label>Bookmaker<select id="fb-book">${BOOK_KEYS.map(k => `<option value="${k}" ${k === toolUi.fbBook ? 'selected' : ''}>${bookName(k)}</option>`).join('')}</select></label>
+    </div>
+    <div class="tool-out" id="fb-out">${fbOutHtml(matches)}</div>
+    <h3>Cote boostée : rentable ou pas ?</h3>
+    <div class="tool-row">
+      <label>Match<select id="boost-match"><option value="">Choisir…</option>${upcoming.map(m => `<option value="${esc(m.id)}" ${m.id === toolUi.boostMatch ? 'selected' : ''}>${esc(`${dayLabel(m.date)}${timeOf(m.date)} ${m.home.short} – ${m.away.short}`)}</option>`).join('')}</select></label>
+      <label>Pari<select id="boost-bet" ${bm ? '' : 'disabled'}>${bets.map((b, i) => `<option value="${i}" ${b === bb ? 'selected' : ''}>${esc(b.label)}</option>`).join('')}</select></label>
+      <label>Cote boostée<input id="boost-odd" type="text" inputmode="decimal" placeholder="ex. 3,50" value="${esc(toolUi.boostOdd)}"></label>
+    </div>
+    <div class="tool-out" id="boost-out">${boostOutHtml(matches)}</div>
+  </details>`;
+}
+
 function renderDefis() {
   if (ui.tab !== 'defis') return;
+  // Pendant la saisie d'un montant ou d'une cote, on ne redessine pas les outils (le clavier resterait ouvert)
+  const typing = ['fb-amount', 'boost-odd'].includes(document.activeElement?.id);
+  if (!typing) $('#defi-tools').innerHTML = renderTools();
   let list = loadDefis();
   // Défis lus avec une ancienne version : on relit leur texte avec la lecture à jour
   if (list.some(d => d.text && d.pv !== PARSE_V && !defiUi.reading.has(d.id))) {
@@ -561,6 +655,21 @@ async function addCaptures(files, toId = null) {
 }
 
 function bindDefis() {
+  const tools = $('#defi-tools');
+  tools.addEventListener('toggle', e => { if (e.target.id === 'tools') toolUi.open = e.target.open; }, true);
+  tools.addEventListener('input', e => {
+    const id = e.target.id;
+    if (id === 'fb-amount') { toolUi.fbAmount = Number(String(e.target.value).replace(',', '.')) || 0; $('#fb-out').innerHTML = fbOutHtml(); }
+    else if (id === 'boost-odd') { toolUi.boostOdd = e.target.value; $('#boost-out').innerHTML = boostOutHtml(); }
+  });
+  tools.addEventListener('change', e => {
+    const id = e.target.id;
+    if (id === 'fb-book') toolUi.fbBook = e.target.value;
+    else if (id === 'boost-match') { toolUi.boostMatch = e.target.value; toolUi.boostBet = 0; }
+    else if (id === 'boost-bet') toolUi.boostBet = Number(e.target.value);
+    else return;
+    renderDefis();
+  });
   const input = $('#defi-file');
   $('#defi-add').addEventListener('click', () => { defiUi.target = null; input.click(); });
   input.addEventListener('change', () => { addCaptures(input.files, defiUi.target); defiUi.target = null; input.value = ''; });

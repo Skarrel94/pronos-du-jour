@@ -4,7 +4,14 @@
 
 const API = 'https://site.api.espn.com/apis/site/v2/sports/';
 const ODDS_API = 'https://api.the-odds-api.com/v4/';
-const ODDS_BOOKS = { betclic_fr: 'betclic', winamax_fr: 'winamax' };
+// Bookmakers lus sur The Odds API. Jusqu'à 10 bookmakers, une requête coûte le même prix qu'un
+// seul : on lit donc tous les sites français (comparateur) et Pinnacle / Betfair (référence).
+const ODDS_BOOKS = {
+  betclic_fr: 'betclic', winamax_fr: 'winamax', unibet_fr: 'unibet', parionssport_fr: 'parionssport',
+  pmu_fr: 'pmu', netbet_fr: 'netbet', pinnacle: 'pinnacle', betfair_ex_eu: 'betfair',
+};
+// Grands Chelems : simple messieurs au meilleur des 5 sets
+const SLAMS = /australian open|roland|french open|wimbledon|us open/i;
 
 // Compétitions proposées par Betclic et Winamax. `odds` = clé The Odds API, `minor` = marge plus forte.
 const soccer = (slug, league, odds, minor) => ({ path: `soccer/${slug}`, sport: 'soccer', league, odds, minor });
@@ -84,11 +91,35 @@ const SRC_BY_PATH = new Map(SOURCES.map(s => [s.path, s]));
 const SPORT_ORDER = ['soccer', 'tennis', 'basketball', 'rugby', 'hockey', 'football', 'baseball', 'mma', 'afl'];
 
 // ---------- Stockage local ----------
+// Si le stockage est plein, on libère les journées gardées en cache (les plus anciennes d'abord)
+// puis on réessaie ; l'historique et le journal des paris passent avant tout le reste.
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch { return d; } },
-  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* stockage plein ou bloqué */ } },
+  set(k, v) {
+    const data = JSON.stringify(v);
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try { localStorage.setItem(k, data); return true; } catch {
+        if (!store.free(k)) break;
+      }
+    }
+    if (!store.warned) { store.warned = true; setTimeout(() => toast?.('Stockage du téléphone plein : supprimez d’anciens défis (captures) pour garder votre historique.'), 0); }
+    return false;
+  },
+  // Supprime la plus ancienne journée en cache (autre que celle qu'on écrit). false si rien à supprimer.
+  free(except) {
+    try {
+      const days = Object.keys(localStorage).filter(x => x.startsWith('pdj-v2-day-') && x !== except).sort();
+      if (!days.length) return false;
+      localStorage.removeItem(days[0]);
+      return true;
+    } catch { return false; }
+  },
 };
-const settings = () => ({ key: '', maxCredits: 20, ...store.get('pdj-settings', {}) });
+const DEFAULT_SETTINGS = { key: '', maxCredits: 20, bankroll: 0, kelly: 0.25, maxPct: 3, books: ['betclic', 'winamax'] };
+const settings = () => ({ ...DEFAULT_SETTINGS, ...store.get('pdj-settings', {}) });
+// Le moteur choisit la meilleure cote parmi les bookmakers où l'utilisateur a un compte
+const applyPrefs = () => { Engine.prefs.books = settings().books.length ? settings().books : DEFAULT_SETTINGS.books; };
+applyPrefs();
 
 // ---------- Dates ----------
 const pad = n => String(n).padStart(2, '0');
@@ -145,6 +176,8 @@ function parseTeam(c, ranks) {
   const t = c.team || {};
   return {
     id: t.id, name: t.displayName, short: t.shortDisplayName || t.displayName, logo: t.logo,
+    // Buts par période (foot : 1re et 2e mi-temps, puis prolongations), pour régler sur 90 minutes
+    ls: c.linescores?.map(l => Number(l.value) || 0),
     record: rec('total'), homeRecord: rec('home'), awayRecord: rec('road') || rec('away'),
     form: c.form, avgPts: stat('avgPoints'), score: c.score, winner: c.winner,
   };
@@ -168,6 +201,9 @@ function toMatch(src, ev, comp, ranks, extra = {}) {
     date: comp.date || ev.date,
     state: st.state || 'pre',
     canceled: /POSTPONED|CANCELED|CANCELLED|SUSPENDED/.test(st.name || ''),
+    // Foot : match allé en prolongation ou aux tirs au but (les paris se règlent sur 90 minutes)
+    aet: /AET|PEN|EXTRA|SHOOTOUT|_ET\b/i.test(st.name || ''),
+    bo: extra.bo,
     detail: st.shortDetail || st.detail || '',
     clock: status.clock, period: status.period, // temps de jeu, pour l'estimation en direct
     neutral: !!comp.neutralSite,
@@ -208,7 +244,8 @@ async function fetchSource(src, dates, day, ranks) {
           if (!/singles|simple/i.test(g.grouping?.displayName || '')) continue;
           for (const c of g.competitions || []) {
             if (!sameLocalDay(c.date, day)) continue;
-            const m = toMatch(src, ev, c, ranks, { league: `${src.league} · ${ev.name}`, tournament: ev.name, round: c.round?.displayName });
+            const bo = src.tour === 'atp' && SLAMS.test(ev.name || '') ? 5 : 3;
+            const m = toMatch(src, ev, c, ranks, { league: `${src.league} · ${ev.name}`, tournament: ev.name, round: c.round?.displayName, bo });
             if (m) out.push(m);
           }
         }
@@ -358,6 +395,7 @@ async function fetchBooks(matches, day, onProgress) {
     for (const m of job.matches) {
       const ev = findEvent(m, events);
       m.oddsChecked = true;
+      m.oddsAt = Date.now();
       m.books = ev ? booksFor(m, ev) : null;
     }
   }
@@ -521,25 +559,106 @@ async function fetchStandings(matches) {
 }
 
 // ---------- Historique des pronostics ----------
-// Le pronostic est mémorisé avant le match pour pouvoir le vérifier honnêtement ensuite.
+// Le pronostic est mémorisé avant le match pour pouvoir le vérifier honnêtement ensuite,
+// avec la cote disponible à ce moment-là (pour calculer le ROI, pas seulement le taux de réussite).
+const sameBet = (a, b) => a.type === b.type && a.side === b.side && (a.line ?? null) === (b.line ?? null);
+// Match proposé par au moins un bookmaker français (une cote Pinnacle seule ne suffit pas)
+const offeredInFrance = m => !m.oddsChecked || !!(m.books && Object.keys(m.books).some(k => Engine.BOOKS[k]));
+
 function rememberPicks(matches) {
   const preds = store.get('pdj-preds', {});
   const hist = store.get('pdj-history', {});
+  let journal = null;
   for (const m of matches) {
     if (m.canceled) continue;
     if (m.state === 'pre') {
       const { best } = m.analysis;
-      preds[m.id] = { type: best.type, side: best.side, line: best.line, label: best.label, p: best.p, day: dayKey(new Date(m.date)), path: m.src.path };
-    } else if (m.state === 'post' && preds[m.id] && !(m.id in hist)) {
-      const won = Engine.settle(preds[m.id], resultOf(m));
-      hist[m.id] = { won, p: preds[m.id].p, day: preds[m.id].day };
-    }
+      preds[m.id] = {
+        type: best.type, side: best.side, line: best.line, label: best.label, p: best.p,
+        odd: best.bestOdd.v, real: best.bestOdd.real, value: Engine.isValue(best), ev: best.ev,
+        sport: m.sport, day: dayKey(new Date(m.date)), path: m.src.path,
+      };
+      // Journal : la dernière cote juste avant le coup d'envoi sert de « cote de clôture » (CLV)
+      journal ??= store.get('pdj-bets', []);
+      for (const j of journal) {
+        if (j.matchId !== m.id || j.status !== 'pending') continue;
+        const b = m.analysis.bets.find(x => sameBet(x, j));
+        if (b) { j.closeFair = b.fair; j.closeSharp = b.evSrc === 'sharp' || m.analysis.model.marketSrc === 'sharp'; }
+      }
+    } else if (m.state === 'post') settleMatch(m, preds, hist, journal ??= store.get('pdj-bets', []));
   }
   // On ne garde que 60 jours
   const limit = dayKey(new Date(Date.now() - 60 * 864e5));
   for (const o of [preds, hist]) for (const k in o) if (o[k].day < limit) delete o[k];
   store.set('pdj-preds', preds);
   store.set('pdj-history', hist);
+  if (journal) store.set('pdj-bets', journal);
+}
+
+// Règle le prono et les paris du journal d'un match terminé.
+function settleMatch(m, preds, hist, journal) {
+  const res = resultOf(m);
+  if (!res) return; // score sur 90 minutes inconnu : on réessaiera
+  const pr = preds[m.id];
+  if (pr && !(m.id in hist)) {
+    const won = Engine.settle(pr, res);
+    hist[m.id] = { won, p: pr.p, day: pr.day, odd: pr.odd, real: pr.real, value: pr.value, sport: pr.sport || m.sport, type: pr.type };
+  }
+  for (const j of journal) {
+    if (j.matchId !== m.id || j.status !== 'pending') continue;
+    const won = Engine.settle(j, res);
+    j.status = won === null ? 'void' : won ? 'won' : 'lost';
+    j.profit = won === null ? 0 : won ? j.stake * (j.odd - 1) : (j.freebet ? 0 : -j.stake);
+    j.settledAt = Date.now();
+  }
+}
+
+// Résultat retenu pour régler les paris. Foot : score à la fin du temps réglementaire (90 minutes),
+// comme Betclic et Winamax, même si le match est allé en prolongation. null si on ne le connaît pas.
+function resultOf(m) {
+  const sets = m.sport === 'tennis' ? (m.home.sets || 0) + (m.away.sets || 0) : null;
+  let h = Number(m.home.score), a = Number(m.away.score);
+  if (m.sport === 'soccer' && (m.aet || (m.home.ls?.length > 2))) {
+    if (!(m.home.ls?.length >= 2 && m.away.ls?.length >= 2)) return null;
+    h = m.home.ls[0] + m.home.ls[1];
+    a = m.away.ls[0] + m.away.ls[1];
+  }
+  return { h, a, winner: m.home.winner ? 'H' : m.away.winner ? 'A' : null, sets };
+}
+
+// Pronos et paris du journal des 7 derniers jours qui n'ont pas encore été réglés (l'app n'était pas
+// ouverte à la fin du match) : on relit les résultats sur ESPN (gratuit).
+async function settlePending() {
+  const preds = store.get('pdj-preds', {});
+  const hist = store.get('pdj-history', {});
+  const journal = store.get('pdj-bets', []);
+  const today = dayKey(new Date());
+  const since = dayKey(new Date(Date.now() - 7 * 864e5));
+  const todo = new Map(); // "path|jour" -> ids
+  const add = (id, path, day) => {
+    if (!path || !SRC_BY_PATH.has(path) || day >= today || day < since) return;
+    const k = `${path}|${day}`;
+    if (!todo.has(k)) todo.set(k, new Set());
+    todo.get(k).add(id);
+  };
+  for (const [id, pr] of Object.entries(preds)) if (!(id in hist)) add(id, pr.path, pr.day);
+  for (const j of journal) if (j.status === 'pending') add(j.matchId, j.path, j.day);
+  if (!todo.size) return 0;
+  const done = new Set();
+  await pool([...todo.entries()].slice(0, 20), 4, async ([k, ids]) => {
+    const [path, day] = k.split('|');
+    const d = new Date(`${day}T12:00:00`);
+    try {
+      for (const m of await fetchSource(SRC_BY_PATH.get(path), espnDatesFor(d), d, null)) {
+        if (!ids.has(m.id) || m.state !== 'post' || m.canceled) continue;
+        settleMatch(m, preds, hist, journal);
+        done.add(m.id);
+      }
+    } catch { /* réessai à la prochaine mise à jour */ }
+  });
+  store.set('pdj-history', hist);
+  store.set('pdj-bets', journal);
+  return done.size;
 }
 
 // Retire partout (journées gardées, pronos, bilan) les compétitions qui ne sont plus suivies,
@@ -567,15 +686,6 @@ function purgeRemovedLeagues() {
   store.set('pdj-history', hist);
 }
 
-function resultOf(m) {
-  const sets = m.sport === 'tennis' ? (m.home.sets || 0) + (m.away.sets || 0) : null;
-  return {
-    h: Number(m.home.score), a: Number(m.away.score),
-    winner: m.home.winner ? 'H' : m.away.winner ? 'A' : null,
-    sets,
-  };
-}
-
 // ---------- Interface ----------
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -592,7 +702,7 @@ const ui = {
   peek: new Set(), // détails ouverts directement dans un top (« top:id », « idDuDéfi:id »)
   loadingLineup: new Set(),
   data: null,
-  tab: store.get('pdj-ui', {}).tab === 'defis' ? 'defis' : 'matchs',
+  tab: ['defis', 'suivi'].includes(store.get('pdj-ui', {}).tab) ? store.get('pdj-ui', {}).tab : 'matchs',
 };
 
 function selectedDay() {
@@ -672,7 +782,10 @@ async function update() {
       Object.keys(localStorage).filter(k => k.startsWith('pdj-v2-day-')).sort().slice(0, -2).forEach(k => localStorage.removeItem(k));
     } catch { /* ignore */ }
     setData(merged, { fetchedAt: Date.now(), failed });
-    toast(ui.data.matches.length ? `${ui.data.matches.length} matchs à jour (gratuit)` : 'Aucun match trouvé pour cette journée');
+    label.textContent = 'Résultats…';
+    const settled = await settlePending();
+    toast((ui.data.matches.length ? `${ui.data.matches.length} matchs à jour (gratuit)` : 'Aucun match trouvé pour cette journée')
+      + (settled ? ` · ${settled} prono(s) des jours précédents réglé(s)` : ''));
   } catch {
     toast('Impossible de joindre les sources. Vérifiez votre connexion internet puis réessayez.');
   } finally {
@@ -722,10 +835,11 @@ async function loadOdds() {
   setBusy(btn, true);
   try {
     const res = await fetchBooks(ui.data.matches, selectedDay(), t => { btn.textContent = t; });
-    const hiddenIds = ui.data.matches.filter(m => m.oddsChecked && !m.books).map(m => m.id);
-    const withBooks = ui.data.matches.filter(m => m.books).length;
+    const hiddenIds = ui.data.matches.filter(m => !offeredInFrance(m)).map(m => m.id);
+    const withBooks = ui.data.matches.filter(m => m.books && offeredInFrance(m)).length;
+    const withSharp = ui.data.matches.filter(m => m.books?.pinnacle || m.books?.betfair).length;
     setData(ui.data.matches.map(strip), { hiddenIds, oddsAt: Date.now() });
-    toast(`Vraies cotes pour ${withBooks} matchs${hiddenIds.length ? ` · ${hiddenIds.length} non proposé(s) retiré(s)` : ''}${res?.credits ? ` · ${res.credits.remaining} crédits restants` : ''}`);
+    toast(`Vraies cotes pour ${withBooks} matchs (référence Pinnacle : ${withSharp})${hiddenIds.length ? ` · ${hiddenIds.length} non proposé(s) retiré(s)` : ''}${res?.credits ? ` · ${res.credits.remaining} crédits restants` : ''}`);
   } catch (e) {
     toast(e.message || 'Impossible de charger les cotes.');
   } finally {
@@ -791,9 +905,9 @@ async function liveTick() {
       if (!f) return base;
       // On ne reprend que l'état du match : les données d'avant-match restent celles du jour
       return {
-        ...base, state: f.state, detail: f.detail, canceled: f.canceled, date: f.date, clock: f.clock, period: f.period,
-        home: { ...base.home, score: f.home.score, winner: f.home.winner, sets: f.home.sets, games: f.home.games },
-        away: { ...base.away, score: f.away.score, winner: f.away.winner, sets: f.away.sets, games: f.away.games },
+        ...base, state: f.state, detail: f.detail, canceled: f.canceled, date: f.date, clock: f.clock, period: f.period, aet: f.aet,
+        home: { ...base.home, score: f.home.score, winner: f.home.winner, sets: f.home.sets, games: f.home.games, ls: f.home.ls },
+        away: { ...base.away, score: f.away.score, winner: f.away.winner, sets: f.away.sets, games: f.away.games, ls: f.away.ls },
       };
     });
     if (lineupsDue) await autoDeep(matches);
@@ -826,19 +940,22 @@ function filtered() {
   });
 }
 
-// Les meilleurs paris : matchs à venir, classés par probabilité x fiabilité, bonus si vraie cote « value »
+// Paris du jour : d'abord les paris value (vraie cote au-dessus de la cote juste Pinnacle), puis,
+// à part, les pronos indicatifs. Un seul classement pour toute l'app : Engine.rankScore.
 function topPicks(matches) {
-  return matches
-    .filter(m => m.state === 'pre' && !m.canceled && m.analysis.best.bestOdd.v >= 1.3)
-    .map(m => {
-      const b = m.analysis.best;
-      const ev = b.p * b.bestOdd.v - 1;
-      return { m, score: b.p * (0.75 + 0.1 * m.analysis.reliability) + 0.8 * Math.max(-0.15, Math.min(ev, 0.15)) };
-    })
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 5)
-    .map(x => x.m);
+  const ok = matches.filter(m => m.state === 'pre' && !m.canceled && m.analysis.best.bestOdd.v >= 1.3)
+    .sort((a, b) => b.analysis.score - a.analysis.score);
+  return { value: ok.filter(m => m.analysis.value).slice(0, 5), other: ok.filter(m => !m.analysis.value).slice(0, 5) };
 }
+
+// Mise conseillée (Kelly fractionné) pour un pari value, si la bankroll est renseignée.
+function stakeOf(b) {
+  const s = settings();
+  return Engine.stakeFor(b, currentBankroll(), s.kelly, s.maxPct / 100);
+}
+const eur2 = x => `${x.toFixed(2).replace('.', ',')} €`;
+const euro = x => `${x >= 0 ? '+' : '−'}${Math.abs(x).toFixed(2).replace('.', ',')} €`;
+const pct1 = p => `${(p * 100).toFixed(1).replace('.', ',')} %`;
 
 // « Winamax 1,85 » ou « ≈ 1,82 Winamax » (estimée)
 function oddTag(b) {
@@ -872,16 +989,30 @@ function renderHeader() {
   if (!ob.disabled) ob.textContent = `Charger les vraies cotes (≈ ${estimateCost()} crédits)`;
 }
 
+// Bilan des pronos : taux de réussite, mais surtout ROI à la cote affichée avant le match
+// (mise fixe de 1 par prono), séparément pour les paris value et les pronos indicatifs.
+function pickStats(list) {
+  const done = list.filter(h => h.won !== null);
+  const withOdd = done.filter(h => h.odd);
+  const profit = withOdd.reduce((s, h) => s + (h.won ? h.odd - 1 : -1), 0);
+  return {
+    n: done.length, won: done.filter(h => h.won).length,
+    expected: done.reduce((s, h) => s + h.p, 0),
+    roi: withOdd.length ? profit / withOdd.length : null, nOdd: withOdd.length,
+  };
+}
+
 function renderRecord() {
-  const hist = Object.values(store.get('pdj-history', {})).filter(h => h.won !== null);
+  const all = Object.values(store.get('pdj-history', {}));
+  const st = pickStats(all);
   const el = $('#record');
-  if (!hist.length) { el.hidden = true; return; }
-  const won = hist.filter(h => h.won).length;
-  const expected = hist.reduce((s, h) => s + h.p, 0);
+  if (!st.n) { el.hidden = true; return; }
+  const v = pickStats(all.filter(h => h.value));
   el.hidden = false;
   el.innerHTML = `<span class="rec-label">Bilan de nos pronos (60 j)</span>
-    <span class="rec-num">${won}/${hist.length}</span>
-    <span class="rec-sub">soit ${pct(won / hist.length)} réussis · attendu ${pct(expected / hist.length)}</span>`;
+    <span class="rec-num">${st.won}/${st.n}</span>
+    <span class="rec-sub">soit ${pct(st.won / st.n)} réussis · attendu ${pct(st.expected / st.n)}${st.roi != null ? ` · ROI ${st.roi >= 0 ? '+' : ''}${pct1(st.roi)}` : ''}${v.n ? ` · paris value : ${v.won}/${v.n}${v.roi != null ? `, ROI ${v.roi >= 0 ? '+' : ''}${pct1(v.roi)}` : ''}` : ''}</span>
+    <button type="button" class="ghost rec-more" data-goto="suivi">Détail</button>`;
 }
 
 function renderChips() {
@@ -972,10 +1103,18 @@ function deepBlock(m) {
   </div>${deepEffect(m)}`;
 }
 
-function oddCell(o, fair) {
+function oddCell(o, fair, b) {
   if (!o) return '<td class="n">–</td>';
-  const value = o.real && o.v > fair;
+  const value = o.real && o.v > fair && b.evSrc === 'sharp';
   return `<td class="n ${o.real ? '' : 'est'}${value ? ' value' : ''}">${o.real ? '' : '≈'}${odd(o.v)}</td>`;
+}
+
+// Meilleure vraie cote chez les autres bookmakers français (comparateur)
+function otherCell(b) {
+  const o = Object.entries(b.odds).filter(([k, x]) => x.real && k !== 'betclic' && k !== 'winamax').sort((x, y) => y[1].v - x[1].v)[0];
+  if (!o) return '<td class="n">–</td>';
+  const value = o[1].v > b.fair && b.evSrc === 'sharp';
+  return `<td class="n${value ? ' value' : ''}">${odd(o[1].v)}<small class="bkname">${esc(Engine.BOOKS[o[0]])}</small></td>`;
 }
 
 // Détail d'un match : analyse, compos/stats, tableau des paris. Sert dans la liste et dans les tops
@@ -984,20 +1123,27 @@ function matchDetails(m, { a = m.analysis, deep = true, hl = null } = {}) {
   const { best, bets, text } = a;
   const lineupBadge = m.lineup?.status === 'official' ? '<span class="badge">Compos officielles</span>' : '';
   const mark = hl || best;
-  const same = b => b === mark || (b.type === mark.type && b.side === mark.side && b.line === mark.line);
+  const same = b => b === mark || sameBet(b, mark);
+  const sharp = a.model?.marketSrc === 'sharp';
   const rows = [...bets].sort((x, y) => y.p - x.p).map(b => `<tr${same(b) ? ' class="is-best"' : ''}>
-      <td>${esc(b.label)}</td><td class="n">${pct(b.p)}</td><td class="n">${odd(b.fair)}</td>
-      ${oddCell(b.odds.betclic, b.fair)}${oddCell(b.odds.winamax, b.fair)}</tr>`).join('');
+      <td>${esc(b.label)}${Engine.isValue(b) ? ` <span class="vtag">+${pct1(b.ev)}</span>` : ''}</td><td class="n">${pct(b.p)}</td><td class="n">${odd(b.fair)}</td>
+      ${oddCell(b.odds.betclic, b.fair, b)}${oddCell(b.odds.winamax, b.fair, b)}${otherCell(b)}</tr>`).join('');
+  const stake = !a.live && a.value ? stakeOf(best) : 0;
+  const stakeLine = !a.live && a.value
+    ? `<p class="stake">${stake ? `Mise conseillée : <b>${eur2(stake)}</b> (${kellyName()} de Kelly, ${settings().maxPct} % max de la bankroll).` : 'Renseignez votre bankroll dans les réglages ⚙ pour voir la mise conseillée.'}</p>` : '';
   return `<div class="details">
-      ${a.live ? '<span class="badge live">Estimation en direct</span>' : lineupBadge}
+      ${a.live ? '<span class="badge live">Estimation en direct</span>' : lineupBadge}${!a.live && a.value ? '<span class="badge value">Pari value</span>' : ''}
       <ul class="analysis">${text.map(t => `<li>${esc(t)}</li>`).join('')}</ul>
+      ${stakeLine}
       ${deep && !a.live ? deepBlock(m) : ''}
       <div class="table-wrap"><table>
-        <thead><tr><th>Pari</th><th class="n">Proba</th><th class="n">Cote juste</th><th class="n">Betclic</th><th class="n">Winamax</th></tr></thead>
+        <thead><tr><th>Pari</th><th class="n">Proba</th><th class="n">Cote juste</th><th class="n">Betclic</th><th class="n">Winamax</th><th class="n">Autres</th></tr></thead>
         <tbody>${rows}</tbody></table></div>
-      <p class="hint">« Cote juste » : à partir de cette cote, le pari est rentable selon notre estimation. Une cote précédée de ≈ est estimée (marge habituelle du bookmaker) : vérifiez la cote réelle dans l’appli Betclic ou Winamax. En vert : vraie cote supérieure à la cote juste.</p>
+      <p class="hint">« Cote juste » : ${sharp ? 'cote Pinnacle sans marge, la meilleure estimation de la vraie probabilité' : 'notre estimation'} ; un pari n’est rentable qu’au-dessus. ≈ : cote estimée (marge habituelle du bookmaker), à vérifier dans l’appli. En vert : vraie cote supérieure à la cote juste Pinnacle (value). « Autres » : meilleure cote chez Unibet, Parions Sport, PMU ou NetBet.</p>
+      ${!a.live && m.state === 'pre' && !m.canceled ? `<button type="button" class="ghost log-btn" data-log="${esc(m.id)}">J’ai joué un pari sur ce match</button>` : ''}
     </div>`;
 }
+const kellyName = () => ({ 0.125: '1/8', 0.25: '1/4', 0.5: '1/2' }[settings().kelly] || `${settings().kelly}`);
 
 // Ligne des équipes et score, en petit, pour le détail ouvert depuis un top
 function peekHead(m) {
@@ -1010,7 +1156,7 @@ function matchCard(m) {
   const when = m.canceled ? 'Reporté' : m.state === 'pre' ? timeOf(m.date)
     : m.state === 'in' ? (m.sport === 'tennis' && m.period ? `Set ${m.period}` : esc(m.detail || 'En cours')) : 'Terminé';
   const pick = m.state === 'pre' && !m.canceled
-    ? `<div class="pick"><span class="pick-label">${esc(best.label)}</span><span class="pick-p">${pct(best.p)}</span>${oddTag(best)}</div>`
+    ? `<div class="pick${m.analysis.value ? ' is-value' : ''}">${m.analysis.value ? `<span class="vtag">value +${pct1(best.ev)}</span>` : ''}<span class="pick-label">${esc(best.label)}</span><span class="pick-p">${pct(best.p)}</span>${oddTag(best)}</div>`
     : verdict(m) || `<div class="pick muted"><span class="pick-label">${esc(best.label)}</span><span class="pick-p">${pct(best.p)}</span></div>`;
   return `<article class="match${open ? ' open' : ''}" data-id="${esc(m.id)}">
     <button class="match-head" aria-expanded="${open}">
@@ -1023,42 +1169,58 @@ function matchCard(m) {
   </article>`;
 }
 
+function ticket(m, i, prefix) {
+  const key = `${prefix}:${m.id}`;
+  const open = ui.peek.has(key);
+  const b = m.analysis.best;
+  const stake = m.analysis.value ? stakeOf(b) : 0;
+  return `<li class="peek${open ? ' open' : ''}">
+    <button class="ticket" data-peek="${esc(key)}" aria-expanded="${open}">
+      <span class="t-rank">${i + 1}</span>
+      <span class="t-body">
+        <span class="t-match">${esc(m.home.short)} – ${esc(m.away.short)}</span>
+        <span class="t-meta">${timeOf(m.date)} · ${esc(Engine.SPORT_CFG[m.sport].label)} · ${esc(m.league)}</span>
+        <span class="t-bet">${esc(b.label)}</span>
+        ${m.analysis.value ? `<span class="t-meta t-info">Cote juste ${odd(b.fair)} · avantage <b class="good">+${pct1(b.ev)}</b>${stake ? ` · mise conseillée ${eur2(stake)}` : ''}</span>` : ''}
+        <span class="t-more">${open ? 'Masquer le détail' : 'Voir le détail et les stats'}</span>
+      </span>
+      <span class="t-num"><b>${pct(b.p)}</b>${oddTag(b)}</span>
+    </button>${open ? `<div class="peek-body">${peekHead(m)}${matchDetails(m)}</div>` : ''}</li>`;
+}
+
 function renderTop(all) {
-  const picks = topPicks(all);
+  const { value, other } = topPicks(all);
   const el = $('#top');
-  if (!picks.length) { el.hidden = true; return; }
+  if (!value.length && !other.length) { el.hidden = true; return; }
   el.hidden = false;
-  const combo = picks.filter(m => m.analysis.best.p >= 0.6).slice(0, 3);
-  const comboP = combo.reduce((s, m) => s * m.analysis.best.p, 1);
-  const comboOdd = combo.reduce((s, m) => s * m.analysis.best.bestOdd.v, 1);
-  const comboReal = combo.every(m => m.analysis.best.bestOdd.real);
-  $('#top-list').innerHTML = picks.map((m, i) => {
-    const key = `top:${m.id}`;
-    const open = ui.peek.has(key);
-    return `<li class="peek${open ? ' open' : ''}">
-      <button class="ticket" data-peek="${esc(key)}" aria-expanded="${open}">
-        <span class="t-rank">${i + 1}</span>
-        <span class="t-body">
-          <span class="t-match">${esc(m.home.short)} – ${esc(m.away.short)}</span>
-          <span class="t-meta">${timeOf(m.date)} · ${esc(Engine.SPORT_CFG[m.sport].label)} · ${esc(m.league)}</span>
-          <span class="t-bet">${esc(m.analysis.best.label)}</span>
-          <span class="t-more">${open ? 'Masquer le détail' : 'Voir le détail et les stats'}</span>
-        </span>
-        <span class="t-num"><b>${pct(m.analysis.best.p)}</b>${oddTag(m.analysis.best)}</span>
-      </button>${open ? `<div class="peek-body">${peekHead(m)}${matchDetails(m)}</div>` : ''}</li>`;
-  }).join('');
+  const upcoming = all.filter(m => m.state === 'pre' && !m.canceled);
+  const sharpN = upcoming.filter(m => m.analysis.model.marketSrc === 'sharp').length;
+  $('#top-title').textContent = value.length ? 'Les paris value du jour' : 'Pas de pari value pour l’instant';
+  $('#top-intro').innerHTML = value.length
+    ? `Vraie cote d’un bookmaker français supérieure d’au moins ${Math.round(Engine.MIN_EDGE * 100)} % à la cote juste Pinnacle : c’est là que se trouve l’espérance de gain.`
+    : sharpN
+      ? `Aucun des ${sharpN} matchs à venir avec une cote Pinnacle n’offre de value chez vos bookmakers. <b>Ne pas parier est aussi une décision gagnante.</b>`
+      : `La value se mesure face à la cote Pinnacle : ${settings().key ? 'appuyez sur « Charger les vraies cotes »' : 'ajoutez une clé The Odds API (⚙) puis chargez les vraies cotes'} pour la détecter.`;
+  $('#top-list').innerHTML = value.map((m, i) => ticket(m, i, 'top')).join('');
+  $('#top-other-wrap').hidden = !other.length;
+  $('#top-other').innerHTML = other.map((m, i) => ticket(m, i, 'topo')).join('');
+  // Combiné : seulement des paris value de matchs différents (la marge se multiplie à chaque sélection)
+  const combo = value.filter(m => m.analysis.best.p >= 0.4).slice(0, 3);
   const c = $('#combo');
   if (combo.length >= 2) {
+    const comboP = combo.reduce((s, m) => s * m.analysis.best.p, 1);
+    const comboOdd = combo.reduce((s, m) => s * m.analysis.best.bestOdd.v, 1);
     c.hidden = false;
-    c.innerHTML = `<div class="combo-head"><span>Combiné du jour</span><span class="combo-num">${pct(comboP)} · cote ${comboReal ? '' : '≈ '}${odd(comboOdd)}</span></div>
+    c.innerHTML = `<div class="combo-head"><span>Combiné value</span><span class="combo-num">${pct(comboP)} · cote ${odd(comboOdd)} · avantage +${pct1(comboP * comboOdd - 1)}</span></div>
       <ul>${combo.map(m => `<li><span>${esc(m.home.short)} – ${esc(m.away.short)}</span><b>${esc(m.analysis.best.label)}</b></li>`).join('')}</ul>
-      <p class="hint">Un combiné multiplie les cotes mais aussi les risques : tous les paris doivent passer.</p>`;
+      <p class="hint">Uniquement des paris value : leurs avantages se multiplient. Les simples restent préférables (moins de variance), et les sélections sont supposées indépendantes.</p>`;
   } else c.hidden = true;
 }
 
 function render() {
   renderHeader();
   renderDefis();
+  renderSuivi();
   renderRecord();
   renderChips();
   const list = $('#list');
@@ -1087,11 +1249,16 @@ function render() {
       <h3>${esc(k)} <span>${arr.length}</span></h3>${arr.map(matchCard).join('')}</section>`).join('');
 }
 
-// ---------- Réglages (clé The Odds API) ----------
+// ---------- Réglages (clé The Odds API, bankroll, bookmakers) ----------
 function openSettings() {
   const s = settings();
   $('#api-key').value = s.key;
   $('#max-credits').value = s.maxCredits;
+  $('#bankroll').value = s.bankroll || '';
+  $('#kelly').value = String(s.kelly);
+  $('#max-pct').value = s.maxPct;
+  $('#my-books').innerHTML = Object.entries(Engine.BOOKS).map(([k, n]) =>
+    `<label class="check"><input type="checkbox" value="${k}" ${s.books.includes(k) ? 'checked' : ''}> ${esc(n)}</label>`).join('');
   const c = store.get('pdj-credits', null);
   $('#credits').textContent = c ? `Crédits restants ce mois-ci : ${c.remaining} (relevé le ${new Date(c.at).toLocaleDateString('fr-FR')}).` : 'Crédits : inconnus tant qu’aucune actualisation n’a utilisé la clé.';
   $('#settings').showModal();
@@ -1101,9 +1268,16 @@ function saveSettings(e) {
   e.preventDefault();
   const key = $('#api-key').value.trim();
   const maxCredits = Math.max(1, Math.min(100, Number($('#max-credits').value) || 20));
-  store.set('pdj-settings', { key, maxCredits });
+  const bankroll = Math.max(0, Number(String($('#bankroll').value).replace(',', '.')) || 0);
+  const kelly = Number($('#kelly').value) || 0.25;
+  const maxPct = Math.max(0.5, Math.min(10, Number(String($('#max-pct').value).replace(',', '.')) || 3));
+  const books = [...document.querySelectorAll('#my-books input:checked')].map(i => i.value);
+  const old = settings();
+  store.set('pdj-settings', { ...old, key, maxCredits, bankroll, kelly, maxPct, books: books.length ? books : DEFAULT_SETTINGS.books });
+  applyPrefs();
   $('#settings').close();
-  toast(key ? 'Clé enregistrée : appuyez sur « Charger les vraies cotes »' : 'Clé supprimée : les cotes seront estimées');
+  toast(key && key !== old.key ? 'Clé enregistrée : appuyez sur « Charger les vraies cotes »' : !key && old.key ? 'Clé supprimée : les cotes seront estimées' : 'Réglages enregistrés');
+  if (ui.data) ui.data.matches = ui.data.matches.map(m => withAnalysis(strip(m)));
   render();
 }
 
@@ -1116,6 +1290,7 @@ function setTab(tab) {
   document.querySelectorAll('[data-tab]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
   $('#view-matchs').hidden = tab !== 'matchs';
   $('#view-defis').hidden = tab !== 'defis';
+  $('#view-suivi').hidden = tab !== 'suivi';
   render();
 }
 
@@ -1154,7 +1329,11 @@ function bind() {
     render();
   });
   $('#search').addEventListener('input', e => { ui.query = e.target.value; render(); });
+  $('#record').addEventListener('click', e => { if (e.target.closest('[data-goto]')) setTab('suivi'); });
+  bindJournal();
   $('#list').addEventListener('click', e => {
+    const lg = e.target.closest('[data-log]');
+    if (lg) { openLog(lg.dataset.log); return; }
     const lu = e.target.closest('[data-lineup]');
     if (lu) { refreshDeep(lu.dataset.lineup); return; }
     const head = e.target.closest('.match-head');
@@ -1164,10 +1343,13 @@ function bind() {
     render();
   });
   $('#top-list').addEventListener('click', onPeekClick);
+  $('#top-other').addEventListener('click', onPeekClick);
 }
 
 // Top 5 (Matchs et Défis) : un appui ouvre le détail du match sur place, sans quitter le top.
 function onPeekClick(e) {
+  const lg = e.target.closest('[data-log]');
+  if (lg) { openLog(lg.dataset.log); return; }
   const lu = e.target.closest('[data-lineup]');
   if (lu) { refreshDeep(lu.dataset.lineup); return; }
   const b = e.target.closest('[data-peek]');

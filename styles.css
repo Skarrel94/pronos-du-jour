@@ -274,7 +274,7 @@ td.value { color: var(--ok); font-weight: 600; background: color-mix(in srgb, va
 .sheet ol { padding-left: 20px; display: flex; flex-direction: column; gap: 4px; }
 .sheet a { color: var(--accent-text); }
 .sheet label { font-weight: 600; font-size: 13px; margin-top: 4px; }
-.sheet input {
+.sheet input, .sheet select {
   border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 8px;
   padding: 9px 12px; font: 500 14px var(--font-num); min-height: 40px; width: 100%;
 }
@@ -400,3 +400,67 @@ td.value { color: var(--ok); font-weight: 600; background: color-mix(in srgb, va
 .defi-book { margin: 10px 0 0; align-items: center; flex-wrap: wrap; }
 .defi-book > span { font-size: 12.5px; color: var(--ink-2); padding: 0 6px 0 10px; }
 .defi-odds { margin-top: 10px; width: 100%; }
+
+/* ---------- Value, comparateur, mises ---------- */
+.good { color: var(--ok); }
+.bad { color: var(--ko); }
+.vtag {
+  display: inline-block; font: 600 11.5px/1.3 var(--font-num); color: var(--ok); white-space: nowrap;
+  background: color-mix(in srgb, var(--ok) 14%, transparent); padding: 1px 6px; border-radius: 999px;
+}
+.pick.is-value { border-left-color: var(--ok); }
+.badge.value { margin-left: 6px; }
+.stake { margin: 0; font-size: 14px; background: color-mix(in srgb, var(--ok) 10%, var(--surface)); border-radius: 8px; padding: 8px 12px; }
+td .bkname { display: block; font: 500 10.5px/1.1 var(--font-body); color: var(--ink-2); }
+.log-btn { align-self: flex-start; }
+h3.sub { margin: 14px 0 6px; font: 700 18px/1.1 var(--font-display); text-transform: uppercase; letter-spacing: .02em; }
+.top .meta { margin: -4px 0 10px; }
+.rec-more { grid-column: 2; justify-self: end; padding: 4px 10px; font-size: 13px; }
+.sheet-sub { margin-top: 10px !important; font-size: 18px !important; }
+.checks { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.check { display: inline-flex; align-items: center; gap: 6px; font-weight: 500 !important; margin: 0 !important; }
+.sheet .check input { width: auto; min-height: 0; }
+.linkish { border: 0; background: none; padding: 0; color: var(--accent-text); text-decoration: underline; font-size: inherit; }
+
+/* ---------- Onglet Suivi ---------- */
+.suivi { display: flex; flex-direction: column; gap: 10px; }
+.suivi h2 { margin: 0; font: 700 21px/1.1 var(--font-display); text-transform: uppercase; }
+#suivi-body { display: flex; flex-direction: column; gap: 10px; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.kpi { background: var(--surface); border-radius: var(--r); padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.kpi span { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-2); }
+.kpi b { font: 700 26px/1.05 var(--font-display); font-variant-numeric: tabular-nums; }
+.kpi small { font-size: 12px; color: var(--ink-2); }
+.curve { width: 100%; height: 70px; background: var(--surface); border-radius: var(--r); }
+.curve polyline { fill: none; stroke-width: 2; vector-effect: non-scaling-stroke; }
+.curve polyline.up { stroke: var(--ok); }
+.curve polyline.down { stroke: var(--ko); }
+.curve .zero { stroke: var(--line); stroke-dasharray: 4 4; vector-effect: non-scaling-stroke; }
+.journal { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.jrow {
+  display: flex; justify-content: space-between; gap: 10px; background: var(--surface); border-radius: var(--r);
+  padding: 10px 12px; border-left: 4px solid var(--line);
+}
+.jrow.won { border-left-color: var(--ok); }
+.jrow.lost { border-left-color: var(--ko); }
+.jmain { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.jmain small { color: var(--ink-2); font-size: 12px; }
+.jside { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; text-align: right; }
+.jst { font-size: 12px; color: var(--ink-2); text-transform: uppercase; letter-spacing: .04em; }
+.jset { display: flex; gap: 4px; }
+.jset button { border: 1px solid var(--line); background: var(--surface-2); border-radius: 6px; padding: 3px 7px; font-size: 12px; }
+.jdel { width: 32px !important; height: 32px !important; }
+#export-csv { align-self: flex-start; }
+
+/* ---------- Outils freebets / cotes boostées ---------- */
+.tools { display: flex; flex-direction: column; gap: 10px; background: var(--surface); border-radius: var(--r); padding: 14px; }
+.tools h3 { margin: 0; font: 700 18px/1.1 var(--font-display); text-transform: uppercase; }
+.tool-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; }
+.tool-row label { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; font-weight: 600; flex: 1 1 140px; min-width: 0; }
+.tool-row input, .tool-row select {
+  border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 8px;
+  padding: 8px 10px; font: 500 14px var(--font-num); min-height: 40px; width: 100%;
+}
+.tool-out { font-size: 14px; }
+.tool-out .tickets { margin-top: 6px; }
+.t-meta.t-info { white-space: normal; overflow: visible; text-overflow: clip; }
