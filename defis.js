@@ -10,6 +10,8 @@ const EST_MARGIN = 0.03;
 // Part moyenne de la valeur d'un freebet réellement récupérée (seul le gain est versé, joué vers 2,5).
 const FREEBET_VALUE = 0.65;
 const DEFI_KEY = 'pdj-defis';
+// Version de la lecture des conditions : les défis lus avant sont relus automatiquement.
+const PARSE_V = 2;
 
 const defiUi = { reading: new Map() }; // id -> progression de lecture (0 à 1)
 const loadDefis = () => store.get(DEFI_KEY, []);
@@ -64,12 +66,14 @@ function parseDefi(raw, leagues = []) {
   const wina = /winamax/.test(t), betc = /betclic/.test(t);
   if (wina !== betc) c.book = wina ? 'winamax' : 'betclic';
 
-  const legsM = t.match(/(?<![:\d])(\d{1,2})\s*(?:selections?|matchs?|paris)\b/);
+  // « 3 sélections », ou l'écriture Betclic « Sél. min. 2 »
+  const legsN = Number(t.match(/(?<![:\d])(\d{1,2})\s*(?:selections?|matchs?|paris)\b/)?.[1]
+    || t.match(/\bsel(?:ections?)?\.?\s*(?:min(?:imum|i)?\.?)\s*:?\s*(\d{1,2})\b/)?.[1] || 0);
   // « simple ou combiné » = au choix : un pari simple suffit
   const free = /(simple ou combine|combine ou simple|simples? et combines?|simple\/combine)/.test(t);
-  if (!free && (/combin/.test(t) || (legsM && Number(legsM[1]) >= 2))) {
+  if (!free && (/combin/.test(t) || legsN >= 2)) {
     c.kind = 'combo';
-    c.legs = legsM ? Math.max(2, Number(legsM[1])) : 2;
+    c.legs = Math.max(2, legsN);
   }
 
   // Cotes : « cote minimum de 1,50 », « cote ≥ 1.50 », « à 1,50 minimum », « @1,50 »
@@ -82,7 +86,9 @@ function parseDefi(raw, leagues = []) {
     odds.push({
       v,
       max: /max/.test(m[1]),
-      total: /(totale|globale|du combine)/.test(ctx) && !/(par selection|chaque selection)/.test(ctx),
+      // Dans un combiné, « cote min. » ou « cote minimale par pari » = cote du combiné entier,
+      // sauf si le texte précise « par sélection ».
+      total: !/(par selection|chaque selection|par match)/.test(ctx),
     });
   }
   for (const m of t.matchAll(new RegExp(`(?:a|@)\\s?${DEC}\\s?(?:minimum|mini|min\\b)`, 'g'))) {
@@ -117,6 +123,10 @@ function parseDefi(raw, leagues = []) {
   c.lottery = /tirage au sort/.test(t);
   c.tickets = /tickets?/.test(t) && /(pari gagne|paris gagnes|chaque pari)/.test(t);
   if (c.lottery) c.when = 'won';
+  // Défi au classement (« 1€ gagné = 1 point », « Voir le classement ») : pas de freebet par pari
+  c.ranking = !c.lottery && /(classement|gagnes? ?= ?\d+ ?points?)/.test(t);
+  c.liveX2 = c.ranking && /live[^.=]{0,20}= ?2 ?points?/.test(t);
+  if (c.ranking) c.freebet = null;
   // Paris en direct exclus ?
   c.noLive = /(hors live|hors direct|avant-match uniquement|pre-?match uniquement|paris? en direct (?:ne sont pas|exclus|non)|live exclus|hors paris? en direct)/.test(t);
 
@@ -125,6 +135,12 @@ function parseDefi(raw, leagues = []) {
   const dates = [...t.matchAll(new RegExp(`(\\d{1,2})(?:er)? (${MONTHS.join('|')})(?: (\\d{4}))?(?: a| des)? (\\d{1,2})[:h](\\d{2})`, 'g'))]
     .map(m => new Date(Number(m[3] || new Date().getFullYear()), MONTHS.indexOf(m[2]), Number(m[1]), Number(m[4]), Number(m[5])))
     .filter(d => !Number.isNaN(+d));
+  // … ou en chiffres : « au 09/11/2026 à 07:00 », « (09/11 - 07h00) »
+  for (const m of t.matchAll(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\s?(?:a|-|,)?\s?(\d{1,2})[:h](\d{2})\b/g)) {
+    const y = m[3] ? (m[3].length === 2 ? 2000 + Number(m[3]) : Number(m[3])) : new Date().getFullYear();
+    const d = new Date(y, Number(m[2]) - 1, Number(m[1]), Number(m[4]), Number(m[5]));
+    if (!Number.isNaN(+d) && Number(m[2]) <= 12) dates.push(d);
+  }
   if (dates.length) c.deadline = Math.max(...dates.map(Number));
 
   for (const [sport, re] of SPORT_WORDS) if (re.test(t)) { c.sport = sport; break; }
@@ -151,7 +167,8 @@ function conditionsText(c) {
   if (c.league) parts.push(c.league);
   else if (c.sport !== 'all') parts.push(Engine.SPORT_CFG[c.sport]?.label || c.sport);
   if (c.stake) parts.push(`mise ${num2(c.stake)} €`);
-  if (c.lottery) parts.push(c.tickets ? '1 ticket par pari gagné, freebets par tirage au sort' : 'freebets par tirage au sort');
+  if (c.ranking) parts.push(`au classement : 1 € gagné = 1 point${c.liveX2 ? ', 2 en live' : ''}`);
+  else if (c.lottery) parts.push(c.tickets ? '1 ticket par pari gagné, freebets par tirage au sort' : 'freebets par tirage au sort');
   else if (c.freebet) parts.push(`freebet ${num2(c.freebet)} € ${c.when === 'lost' ? 'si perdu' : c.when === 'any' ? 'dans tous les cas' : 'si gagné'}`);
   return parts.join(' · ');
 }
@@ -289,7 +306,16 @@ function defiRow(x, i, did) {
   </button>${open ? `<div class="peek-body">${peekHead(m)}${matchDetails(m, { a: m.liveA || m.analysis, deep: inToday, hl: b })}</div>` : ''}</li>`;
 }
 
-function valueBlock(c, p, o) {
+function valueBlock(c, p, o, live = false) {
+  if (c.ranking) {
+    const s = c.stake || 2;
+    const pts = s * o * (live && c.liveX2 ? 2 : 1);
+    return `<div class="defi-value">
+      <p class="defi-verdict">Défi au classement : pas de freebet garanti</p>
+      <p>Chaque € gagné rapporte 1 point${c.liveX2 ? ' (2 points sur un combiné en live)' : ''}, et seuls les mieux classés reçoivent des freebets. Avec ce combiné à ${num2(s)} € : environ <b>${Math.round(pts)} points</b> s’il passe (${pct(p)} de chances). Résultat moyen de la mise selon l’estimation : ${eur(s * (p * o - 1))}.</p>
+      <p class="hint">Grimper beaucoup de places demande de gros gains, donc de grosses mises ou de grosses cotes, perdantes en moyenne. Ne misez pas plus que prévu pour monter au classement.</p>
+    </div>`;
+  }
   if (c.lottery) {
     return `<div class="defi-value">
       <p class="defi-verdict">Récompense par tirage au sort</p>
@@ -323,21 +349,24 @@ function defiResults(c, did) {
     return `<p class="defi-empty">Aucun match à venir ou en cours${c.league ? ` en ${esc(c.league)}` : ''} chargé. Appuyez sur <b>Mettre à jour</b> (gratuit) pour aujourd’hui et pour demain.</p>`;
   }
   const options = all.map(m => eligibleBets(m, c)).filter(o => o.length).sort((a, b) => b[0].b.p - a[0].b.p);
-  const estNote = all.some(m => m.books) ? '' : `<p class="hint">Cotes estimées : par sécurité, l’app ne retient que des cotes d’au moins ${odd((c.minOdd || 1.01) + EST_MARGIN)}. Vérifiez la cote dans l’appli avant de jouer.</p>`;
+  const est = !all.some(m => m.books);
+  // Cote totale estimée : même marge de sécurité, la cote réelle peut être un peu plus basse
+  const minTotal = c.minTotal ? c.minTotal + (est ? 2 * EST_MARGIN : 0) : null;
+  const estNote = !est ? '' : `<p class="hint">Cotes estimées : par sécurité, l’app ne retient que des cotes d’au moins ${c.minTotal && !c.minOdd ? `${odd(minTotal)} au total` : odd((c.minOdd || 1.01) + EST_MARGIN)}. Vérifiez la cote dans l’appli avant de jouer.</p>`;
   if (!options.length) return `<p class="defi-empty">Aucun pari des ${all.length} matchs à venir ou en cours ne respecte ces cotes.</p>`;
   if (c.kind !== 'combo') {
     const top = options.slice(0, 5).map(o => o[0]);
     return `<p class="defi-sub">Top ${top.length} des paris qui remplissent la condition au plus juste</p>
       <ol class="tickets">${top.map(row).join('')}</ol>${estNote}${liveNote(top)}${valueBlock(c, top[0].b.p, top[0].o.v)}`;
   }
-  const best = bestCombo(options, c.legs, c.minTotal);
+  const best = bestCombo(options, c.legs, minTotal);
   if (!best) return `<p class="defi-empty">Pas assez de matchs compatibles (${options.length}) pour un combiné de ${c.legs} sélections.</p>`;
   const spare = options.filter(o => !best.sel.some(x => x.m.id === o[0].m.id)).slice(0, 3).map(o => o[0]);
   return `<div class="combo"><div class="combo-head"><span>Combiné conseillé · ${best.sel.length} sélections</span><span class="combo-num">${pct(best.p)} · cote ${best.real ? '' : '≈ '}${odd(best.o)}</span></div>
       <p class="hint">Le moins de sélections possible pour remplir la condition, chacune la plus probable. ${best.sel.some(x => x.m.liveA) ? 'Contient des matchs en cours : à placer tout de suite.' : 'À placer avant le premier match.'}</p></div>
     <ol class="tickets">${best.sel.map(row).join('')}</ol>
     ${spare.length ? `<p class="defi-sub">Remplaçants si une cote a bougé</p><ol class="tickets">${spare.map(row).join('')}</ol>` : ''}
-    ${estNote}${liveNote([...best.sel, ...spare])}${valueBlock(c, best.p, best.o)}`;
+    ${estNote}${liveNote([...best.sel, ...spare])}${valueBlock(c, best.p, best.o, best.sel.some(x => x.m.liveA))}`;
 }
 
 const thumbsOf = d => d.thumbs || (d.thumb ? [d.thumb] : []);
@@ -362,7 +391,13 @@ function defiCard(d) {
 
 function renderDefis() {
   if (ui.tab !== 'defis') return;
-  const list = loadDefis();
+  let list = loadDefis();
+  // Défis lus avec une ancienne version : on relit leur texte avec la lecture à jour
+  if (list.some(d => d.text && d.pv !== PARSE_V && !defiUi.reading.has(d.id))) {
+    const leagues = [...new Set(defiMatches().map(m => m.league))];
+    list = list.map(d => (d.text && d.pv !== PARSE_V && !defiUi.reading.has(d.id) ? { ...d, c: parseDefi(d.text, leagues), pv: PARSE_V } : d));
+    saveDefis(list);
+  }
   $('#defi-list').innerHTML = list.length
     ? list.map(defiCard).join('')
     : '<p class="defi-empty">Aucun défi pour l’instant. Ajoutez une capture d’écran d’un défi Winamax ou Betclic : l’app lit les conditions toute seule.</p>';
@@ -422,7 +457,7 @@ async function addCaptures(files, toId = null) {
     }
     const text = texts.join('\n');
     const leagues = [...new Set(defiMatches().map(m => m.league))];
-    Object.assign(d, { texts, text, title: titleOf(text), c: parseDefi(text, leagues) });
+    Object.assign(d, { texts, text, title: titleOf(text), c: parseDefi(text, leagues), pv: PARSE_V });
   } catch (e) {
     d.error = e.message || 'Impossible de lire cette capture.';
   }
