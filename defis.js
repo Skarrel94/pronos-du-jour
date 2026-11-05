@@ -189,7 +189,7 @@ function defiMatches() {
     d.setDate(d.getDate() + off);
     const live = ui.data?.day === dayKey(d) ? ui.data.matches : null;
     const c = live ? null : store.get(cacheKey(d), null);
-    out.push(...(live || (c ? c.matches.filter(m => SRC_BY_PATH.has(m.src?.path)).map(withAnalysis) : [])));
+    out.push(...(live || (c ? c.matches.filter(m => isActive(m.src?.path)).map(withAnalysis) : [])));
   }
   const soon = Date.now() + 2 * 60e3;
   const seen = new Set();
@@ -422,7 +422,7 @@ function defiResults(c, did) {
 function oddsGroupCost(m) {
   const s = SRC_BY_PATH.get(m.src?.path);
   if (!s || !(s.odds || s.oddsTitle || s.sport === 'tennis')) return 0;
-  return s.sport === 'soccer' ? 2 : s.sport === 'tennis' || s.sport === 'mma' ? 1 : 3;
+  return oddsCost(s);
 }
 const oddsGroup = m => `${m.src.path}|${m.tournament || ''}`;
 

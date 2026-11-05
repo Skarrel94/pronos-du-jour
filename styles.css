@@ -420,6 +420,14 @@ h3.sub { margin: 14px 0 6px; font: 700 18px/1.1 var(--font-display); text-transf
 .checks { display: flex; flex-wrap: wrap; gap: 6px 14px; }
 .check { display: inline-flex; align-items: center; gap: 6px; font-weight: 500 !important; margin: 0 !important; }
 .sheet .check input { width: auto; min-height: 0; }
+.modes { display: flex; flex-direction: column; gap: 6px; background: none; padding: 0; border-radius: 0; }
+.leagues { border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.leagues[disabled] { opacity: .5; }
+.leagues summary { font-weight: 600; font-size: 13.5px; cursor: pointer; padding: 4px 0; }
+.leagues summary small { color: var(--ink-2); font-weight: 500; }
+.leagues .checks { flex-direction: column; gap: 4px; padding: 4px 0 6px 4px; }
+.leagues .check { font-size: 13.5px; }
+#leagues-reset { align-self: flex-start; }
 .linkish { border: 0; background: none; padding: 0; color: var(--accent-text); text-decoration: underline; font-size: inherit; }
 
 /* ---------- Onglet Suivi ---------- */
