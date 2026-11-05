@@ -13,7 +13,9 @@ const DEFI_KEY = 'pdj-defis';
 // Version de la lecture des conditions : les défis lus avant sont relus automatiquement.
 const PARSE_V = 2;
 
-const defiUi = { reading: new Map() }; // id -> progression de lecture (0 à 1)
+// reading : id -> progression de lecture (0 à 1) ; legs : id -> nombre de sélections choisi ;
+// todo : id -> matchs affichés dont on peut charger les vraies cotes
+const defiUi = { reading: new Map(), legs: new Map(), todo: new Map() };
 const loadDefis = () => store.get(DEFI_KEY, []);
 const saveDefis = list => store.set(DEFI_KEY, list);
 
@@ -188,7 +190,8 @@ function defiMatches() {
   const soon = Date.now() + 2 * 60e3;
   const seen = new Set();
   const today = ui.data?.day === dayKey(new Date()) ? new Set(ui.data.matches.map(m => m.id)) : new Set();
-  return out.filter(m => !m.canceled && !seen.has(m.id) && seen.add(m.id)).map(m => {
+  // (oddsChecked sans cotes : match que Betclic et Winamax ne proposent pas)
+  return out.filter(m => !m.canceled && !(m.oddsChecked && !m.books) && !seen.has(m.id) && seen.add(m.id)).map(m => {
     if (m.state === 'pre' && new Date(m.date) > soon) return m;
     // En cours : seulement si les scores sont tenus à jour (journée d'aujourd'hui affichée)
     if (m.state === 'in' && today.has(m.id)) {
@@ -200,57 +203,68 @@ function defiMatches() {
   }).filter(Boolean);
 }
 
+const BOOK_KEYS = ['betclic', 'winamax'];
+
 // Cote du pari chez le bookmaker choisi (« both » : la meilleure des deux).
-function bookOdd(b, book) {
-  if (book === 'both') return { ...b.bestOdd, book: b.bestBook };
-  const o = b.odds[book];
-  return o ? { ...o, book } : null;
+// Si les vraies cotes du match sont chargées, seules les vraies cotes comptent : un pari que l'API
+// ne cote pas (les deux marquent, double chance, remboursé si nul…) est alors écarté.
+function bookOdd(b, book, m) {
+  const keys = book === 'both' ? BOOK_KEYS : [book];
+  const odds = keys.map(k => b.odds[k] && { ...b.odds[k], book: k })
+    .filter(o => o && (!m.books || o.real))
+    .sort((x, y) => y.v - x.v);
+  return odds[0] || null;
 }
 
 // Tous les paris d'un match qui respectent les conditions, du plus probable au moins probable.
+// eff : cote retenue pour les calculs (une cote estimée est comptée 3 % plus bas, par sécurité).
 function eligibleBets(m, c) {
   const min = c.minOdd || 1.01;
   const max = c.maxOdd || Infinity;
   return (m.liveA || m.analysis).bets
-    .map(b => ({ m, b, o: bookOdd(b, c.book) }))
+    .map(b => ({ m, b, o: bookOdd(b, c.book, m) }))
     .filter(x => x.o && x.o.v >= min + (x.o.real ? 0 : EST_MARGIN) && x.o.v <= max)
+    .map(x => ({ ...x, eff: x.o.real ? x.o.v : x.o.v / (1 + EST_MARGIN) }))
     .sort((x, y) => y.b.p - x.b.p || x.o.v - y.o.v);
 }
 
-// Combiné : au moins `legs` matchs différents, cote totale >= minTotal, probabilité maximale.
-function bestCombo(options, legs, minTotal) {
-  const pool = options.slice(0, 40); // [[pari le plus probable du match, ...autres], ...]
-  if (pool.length < legs) return null;
-  const lp = x => Math.log(x.b.p), lo = x => Math.log(x.o.v);
-  const target = Math.log(minTotal || 1);
-  let best = null;
-  for (let k = legs; k <= Math.min(pool.length, legs + 6); k++) {
-    const pick = new Map(pool.slice(0, k).map((opts, i) => [i, opts[0]]));
-    let logO = [...pick.values()].reduce((s, x) => s + lo(x), 0);
-    for (let guard = 0; logO < target - 1e-9 && guard < 60; guard++) {
-      // Meilleur échange : le plus de cote gagnée pour le moins de probabilité perdue
-      let move = null;
-      for (const [i, cur] of pick) {
-        const tryIt = (key, nx) => {
-          const dO = lo(nx) - lo(cur);
-          if (dO <= 1e-9) return;
-          const eff = Math.max(0, lp(cur) - lp(nx)) / dO;
-          if (!move || eff < move.eff) move = { eff, from: i, to: key, nx, dO };
-        };
-        pool[i].forEach(nx => tryIt(i, nx));
-        pool.forEach((opts, j) => { if (!pick.has(j)) opts.forEach(nx => tryIt(j, nx)); });
+// Combinés optimisés : pour chaque nombre de sélections (du minimum du défi à 5), la combinaison
+// la plus probable dont la cote totale atteint minTotal, un seul pari par match.
+// Programmation dynamique sur la cote (en log, arrondie vers le bas : la cote réelle est toujours ≥).
+const MAX_LEGS = 5;
+function bestCombos(options, minLegs, minTotal) {
+  const pool = options.slice(0, 40).map(opts => opts.slice(0, 15));
+  const maxL = Math.max(minLegs, MAX_LEGS);
+  const STEP = 0.004;
+  const T = minTotal ? Math.ceil(Math.log(minTotal) / STEP - 1e-9) : 0;
+  let best = Array.from({ length: maxL + 1 }, () => new Array(T + 1).fill(null));
+  best[0][0] = { lp: 0, sel: null };
+  for (const opts of pool) {
+    const next = best.map(r => r.slice());
+    for (let k = 0; k < maxL; k++) {
+      for (let b = 0; b <= T; b++) {
+        const cur = best[k][b];
+        if (!cur) continue;
+        for (const x of opts) {
+          const nb = Math.min(T, b + Math.floor(Math.log(x.eff) / STEP + 1e-9));
+          const lp = cur.lp + Math.log(x.b.p);
+          const t = next[k + 1][nb];
+          if (!t || lp > t.lp) next[k + 1][nb] = { lp, sel: { x, prev: cur.sel } };
+        }
       }
-      if (!move) break;
-      pick.delete(move.from);
-      pick.set(move.to, move.nx);
-      logO += move.dO;
     }
-    if (logO < target - 1e-9) continue;
-    const sel = [...pick.values()].sort((a, b) => new Date(a.m.date) - new Date(b.m.date));
-    const p = sel.reduce((s, x) => s * x.b.p, 1);
-    if (!best || p > best.p) best = { sel, p, o: Math.exp(logO), real: sel.every(x => x.o.real) };
+    best = next;
   }
-  return best;
+  const out = [];
+  for (let k = minLegs; k <= maxL; k++) {
+    const r = best[k][T];
+    if (!r) continue;
+    const sel = [];
+    for (let s = r.sel; s; s = s.prev) sel.push(s.x);
+    sel.sort((a, b) => new Date(a.m.date) - new Date(b.m.date));
+    out.push({ k, sel, p: Math.exp(r.lp), o: sel.reduce((s, x) => s * x.o.v, 1), real: sel.every(x => x.o.real) });
+  }
+  return out;
 }
 
 // Le défi vaut-il le coup ? Perte moyenne due à la marge + valeur moyenne du freebet.
@@ -349,24 +363,99 @@ function defiResults(c, did) {
     return `<p class="defi-empty">Aucun match à venir ou en cours${c.league ? ` en ${esc(c.league)}` : ''} chargé. Appuyez sur <b>Mettre à jour</b> (gratuit) pour aujourd’hui et pour demain.</p>`;
   }
   const options = all.map(m => eligibleBets(m, c)).filter(o => o.length).sort((a, b) => b[0].b.p - a[0].b.p);
-  const est = !all.some(m => m.books);
-  // Cote totale estimée : même marge de sécurité, la cote réelle peut être un peu plus basse
-  const minTotal = c.minTotal ? c.minTotal + (est ? 2 * EST_MARGIN : 0) : null;
-  const estNote = !est ? '' : `<p class="hint">Cotes estimées : par sécurité, l’app ne retient que des cotes d’au moins ${c.minTotal && !c.minOdd ? `${odd(minTotal)} au total` : odd((c.minOdd || 1.01) + EST_MARGIN)}. Vérifiez la cote dans l’appli avant de jouer.</p>`;
+  const estNote = shown => shown.every(x => x.o.real) ? '' : `<p class="hint">Cote${shown.length > 1 ? 's' : ''} marquée${shown.length > 1 ? 's' : ''} ≈ : estimée${shown.length > 1 ? 's' : ''}, comptée${shown.length > 1 ? 's' : ''} 3 % plus bas par sécurité. Chargez les vraies cotes ou vérifiez dans l’appli avant de jouer.</p>`;
   if (!options.length) return `<p class="defi-empty">Aucun pari des ${all.length} matchs à venir ou en cours ne respecte ces cotes.</p>`;
   if (c.kind !== 'combo') {
     const top = options.slice(0, 5).map(o => o[0]);
     return `<p class="defi-sub">Top ${top.length} des paris qui remplissent la condition au plus juste</p>
-      <ol class="tickets">${top.map(row).join('')}</ol>${estNote}${liveNote(top)}${valueBlock(c, top[0].b.p, top[0].o.v)}`;
+      <ol class="tickets">${top.map(row).join('')}</ol>${oddsAction(top, did)}${estNote(top)}${liveNote(top)}${valueBlock(c, top[0].b.p, top[0].o.v)}`;
   }
-  const best = bestCombo(options, c.legs, minTotal);
-  if (!best) return `<p class="defi-empty">Pas assez de matchs compatibles (${options.length}) pour un combiné de ${c.legs} sélections.</p>`;
+  const mixed = bestCombos(options, c.legs, c.minTotal);
+  if (!mixed.length) return `<p class="defi-empty">Pas assez de matchs compatibles (${options.length}) pour un combiné de ${c.legs} à ${Math.max(c.legs, MAX_LEGS)} sélections${c.minTotal ? ` à ${odd(c.minTotal)}` : ''}.</p>`;
+  const topOf = list => list.reduce((a, b) => (b.p > a.p + 1e-9 ? b : a));
+  // Dès que des vraies cotes sont chargées : combiné 100 % vraies cotes en priorité. On signale
+  // seulement s'il existe un combiné nettement plus sûr avec des matchs aux cotes encore estimées.
+  const realOpts = options.map(o => o.filter(x => x.o.real)).filter(o => o.length);
+  const realCombos = realOpts.length >= c.legs ? bestCombos(realOpts, c.legs, c.minTotal) : [];
+  const combos = realCombos.length ? realCombos : mixed;
+  const top = topOf(combos);
+  const better = realCombos.length && topOf(mixed).p > top.p + 0.02 && !topOf(mixed).real ? topOf(mixed) : null;
+  const best = combos.find(x => x.k === defiUi.legs.get(did)) || top;
   const spare = options.filter(o => !best.sel.some(x => x.m.id === o[0].m.id)).slice(0, 3).map(o => o[0]);
-  return `<div class="combo"><div class="combo-head"><span>Combiné conseillé · ${best.sel.length} sélections</span><span class="combo-num">${pct(best.p)} · cote ${best.real ? '' : '≈ '}${odd(best.o)}</span></div>
-      <p class="hint">Le moins de sélections possible pour remplir la condition, chacune la plus probable. ${best.sel.some(x => x.m.liveA) ? 'Contient des matchs en cours : à placer tout de suite.' : 'À placer avant le premier match.'}</p></div>
+  const choices = combos.length > 1 ? `<div class="legs-pick" role="group" aria-label="Nombre de sélections">${combos.map(x => `<button type="button" data-legs="${esc(did)}:${x.k}" aria-pressed="${x === best}">
+      <b>${x.k} sél.</b><span>${pct(x.p)}</span><small>cote ${x.real ? '' : '≈ '}${odd(x.o)}</small>${x === top ? '<em>le + sûr</em>' : ''}</button>`).join('')}</div>` : '';
+  return `<div class="combo"><div class="combo-head"><span>Combiné ${best === top ? 'optimisé' : 'choisi'} · ${best.sel.length} sélections</span><span class="combo-num">${pct(best.p)} · cote ${best.real ? '' : '≈ '}${odd(best.o)}</span></div>
+      <p class="hint">La combinaison la plus probable qui atteint ${c.minTotal ? `la cote de ${odd(c.minTotal)}` : 'la condition'}, comparée de ${c.legs} à ${Math.max(c.legs, MAX_LEGS)} sélections. ${best.sel.some(x => x.m.liveA) ? 'Contient des matchs en cours : à placer tout de suite.' : 'À placer avant le premier match.'}</p>${choices}</div>
     <ol class="tickets">${best.sel.map(row).join('')}</ol>
+    ${better ? `<p class="hint">Peut-être plus sûr : un combiné à ${pct(better.p)} avec des matchs dont les cotes ne sont pas encore chargées (${better.sel.filter(x => !x.o.real).map(x => esc(`${x.m.home.short} – ${x.m.away.short}`)).join(', ')}).</p>${oddsAction(better.sel, did)}` : oddsAction([...best.sel, ...spare], did)}
     ${spare.length ? `<p class="defi-sub">Remplaçants si une cote a bougé</p><ol class="tickets">${spare.map(row).join('')}</ol>` : ''}
-    ${estNote}${liveNote([...best.sel, ...spare])}${valueBlock(c, best.p, best.o, best.sel.some(x => x.m.liveA))}`;
+    ${estNote(best.sel)}${liveNote([...best.sel, ...spare])}${valueBlock(c, best.p, best.o, best.sel.some(x => x.m.liveA))}`;
+}
+
+// ---------- Vraies cotes des paris proposés ----------
+// Coût The Odds API d'une compétition (comme pour le bouton « Charger les vraies cotes »).
+function oddsGroupCost(m) {
+  const s = SRC_BY_PATH.get(m.src?.path);
+  if (!s || !(s.odds || s.oddsTitle || s.sport === 'tennis')) return 0;
+  return s.sport === 'soccer' ? 2 : s.sport === 'tennis' || s.sport === 'mma' ? 1 : 3;
+}
+const oddsGroup = m => `${m.src.path}|${m.tournament || ''}`;
+
+// Paris affichés dont la vraie cote peut encore être chargée, regroupés par compétition.
+function oddsTodo(shown) {
+  const groups = new Map();
+  for (const { m, o } of shown) {
+    if (o.real || m.liveA || m.state !== 'pre' || m.oddsChecked || !oddsGroupCost(m)) continue;
+    groups.set(oddsGroup(m), oddsGroupCost(m));
+  }
+  return { groups, cost: [...groups.values()].reduce((a, b) => a + b, 0) };
+}
+
+function oddsAction(shown, did) {
+  const { groups, cost } = oddsTodo(shown);
+  const left = shown.filter(x => !x.o.real).length;
+  if (!cost) {
+    return left && shown.some(x => !x.o.real && (x.m.liveA || !oddsGroupCost(x.m)))
+      ? '<p class="hint">Certaines cotes ne peuvent pas être chargées (match en cours ou compétition non couverte par The Odds API) : vérifiez-les dans l’appli.</p>' : '';
+  }
+  defiUi.todo.set(did, shown.map(x => x.m.id));
+  return `<button type="button" class="odds-btn defi-odds" data-odds-for="${esc(did)}">Charger les vraies cotes de ces paris · ${cost} crédit${cost > 1 ? 's' : ''} (${groups.size} compétition${groups.size > 1 ? 's' : ''})</button>
+    <p class="hint">Avec les vraies cotes, l’app recalcule le combiné uniquement avec des paris cotés par Betclic et Winamax (1N2, plus/moins de buts ou de points, handicap) : « les deux marquent », double chance ou remboursé si nul ne sont pas fournis par The Odds API.</p>`;
+}
+
+// Charge les vraies cotes des compétitions des paris proposés, puis recalcule.
+async function loadDefiOdds(did, btn) {
+  if (!settings().key) { toast('Ajoutez d’abord une clé The Odds API (bouton réglages).'); $('#open-settings').click(); return; }
+  const ids = new Set(defiUi.todo.get(did) || []);
+  const shown = defiMatches().filter(m => ids.has(m.id));
+  const costs = new Map(shown.filter(m => m.state === 'pre' && !m.oddsChecked && oddsGroupCost(m)).map(m => [oddsGroup(m), oddsGroupCost(m)]));
+  const groups = new Set(costs.keys());
+  const cost = [...costs.values()].reduce((a, b) => a + b, 0);
+  if (!cost) return;
+  if (!(await confirmCredits(cost))) return;
+  setBusy(btn, true);
+  let credits = null;
+  try {
+    for (const off of [0, 1]) {
+      const day = new Date();
+      day.setDate(day.getDate() + off);
+      const inUi = ui.data?.day === dayKey(day);
+      const cached = inUi ? null : store.get(cacheKey(day), null);
+      const list = inUi ? ui.data.matches : cached?.matches;
+      const todo = (list || []).filter(m => m.state === 'pre' && !m.canceled && groups.has(oddsGroup(m)));
+      if (!todo.length) continue;
+      const res = await fetchBooks(todo, day, t => { btn.textContent = t; });
+      credits = res?.credits || credits;
+      if (inUi) { ui.data.matches = ui.data.matches.map(m => withAnalysis(strip(m))); saveDay(); }
+      else store.set(cacheKey(day), cached);
+    }
+    toast(`Vraies cotes chargées${credits ? ` · ${credits.remaining} crédits restants` : ''}`);
+  } catch (e) {
+    toast(e.message || 'Impossible de charger les cotes.');
+  } finally {
+    render();
+    renderDefis();
+  }
 }
 
 const thumbsOf = d => d.thumbs || (d.thumb ? [d.thumb] : []);
@@ -374,19 +463,24 @@ const thumbsOf = d => d.thumbs || (d.thumb ? [d.thumb] : []);
 function defiCard(d) {
   const reading = defiUi.reading.get(d.id);
   const thumbs = thumbsOf(d);
+  // Bookmaker choisi à la main (la capture ne dit pas toujours si c'est Betclic ou Winamax)
+  const c = d.book ? { ...d.c, book: d.book } : d.c;
   const head = `<div class="defi-head">
       <div class="defi-thumbs">${thumbs.map(t => `<img src="${t}" alt="" class="defi-thumb">`).join('')}
         ${reading == null && thumbs.length < MAX_SHOTS ? `<button type="button" class="defi-more" data-add-to="${esc(d.id)}" aria-label="Ajouter une 2e capture à ce défi">+<small>2e capture</small></button>` : ''}</div>
       <div class="defi-cond">${reading != null
         ? `<b>Lecture de la capture… ${Math.round(reading * 100)} %</b>`
         : d.error ? `<b class="warn">${esc(d.error)}</b>`
-        : `<b>${esc(d.title || 'Défi')}</b><span>${esc(conditionsText(d.c))}</span>`}</div>
+        : `<b>${esc(d.title || 'Défi')}</b><span>${esc(conditionsText(c))}</span>`}</div>
       <button type="button" class="icon-btn defi-del" data-del-defi="${esc(d.id)}" aria-label="Supprimer ce défi">✕</button>
     </div>`;
   if (reading != null || d.error) return `<article class="defi-card">${head}</article>`;
   const unsure = !d.c.minOdd && !d.c.minTotal
     ? `<p class="hint warn">Aucune cote minimum trouvée sur la capture : l’app propose les paris les plus sûrs. Si le défi impose une cote, ${thumbs.length < MAX_SHOTS ? 'ajoutez une 2e capture avec la suite des conditions (bouton +) ou ' : ''}refaites une capture plus nette du texte des conditions.</p>` : '';
-  return `<article class="defi-card">${head}${unsure}${defiResults(d.c, d.id)}</article>`;
+  const books = d.c.book === 'both' || d.book
+    ? `<div class="seg defi-book" role="group" aria-label="Bookmaker du défi"><span>Défi</span>${[['betclic', 'Betclic'], ['winamax', 'Winamax'], ['both', 'Les deux']]
+      .map(([k, l]) => `<button type="button" data-book="${esc(d.id)}:${k}" aria-pressed="${c.book === k}">${l}</button>`).join('')}</div>` : '';
+  return `<article class="defi-card">${head}${books}${unsure}${defiResults(c, d.id)}</article>`;
 }
 
 function renderDefis() {
@@ -481,6 +575,22 @@ function bindDefis() {
     if (del) { saveDefis(loadDefis().filter(d => d.id !== del.dataset.delDefi)); renderDefis(); return; }
     const more = e.target.closest('[data-add-to]');
     if (more) { defiUi.target = more.dataset.addTo; input.click(); return; }
+    const legs = e.target.closest('[data-legs]');
+    if (legs) {
+      const [id, k] = legs.dataset.legs.split(':');
+      defiUi.legs.set(id, Number(k));
+      renderDefis();
+      return;
+    }
+    const bk = e.target.closest('[data-book]');
+    if (bk) {
+      const [id, book] = bk.dataset.book.split(':');
+      saveDefis(loadDefis().map(x => (x.id === id ? { ...x, book } : x)));
+      renderDefis();
+      return;
+    }
+    const oddsBtn = e.target.closest('[data-odds-for]');
+    if (oddsBtn) { if (!oddsBtn.disabled) loadDefiOdds(oddsBtn.dataset.oddsFor, oddsBtn); return; }
     onPeekClick(e); // détail du match ouvert sur place
   });
 }

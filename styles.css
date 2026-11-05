@@ -385,3 +385,18 @@ td.value { color: var(--ok); font-weight: 600; background: color-mix(in srgb, va
   align-items: center; justify-content: center; gap: 1px; cursor: pointer; padding: 0;
 }
 .defi-more small { font: 600 9px/1 var(--font-body); }
+
+/* Défis : choix du nombre de sélections, du bookmaker, vraies cotes */
+.legs-pick { display: grid; grid-template-columns: repeat(auto-fit, minmax(64px, 1fr)); gap: 6px; margin-top: 10px; }
+.legs-pick button {
+  border: 1px solid rgb(0 0 0 / .25); background: transparent; color: inherit; border-radius: 8px;
+  padding: 6px 4px; display: flex; flex-direction: column; align-items: center; gap: 1px; min-height: 44px; cursor: pointer;
+}
+.legs-pick button[aria-pressed="true"] { background: var(--accent-ink); color: var(--accent); border-color: var(--accent-ink); }
+.legs-pick b { font: 700 14px/1.1 var(--font-display); text-transform: uppercase; }
+.legs-pick span { font: 700 16px/1.1 var(--font-display); font-variant-numeric: tabular-nums; }
+.legs-pick small { font-size: 11px; opacity: .85; }
+.legs-pick em { font-style: normal; font-size: 10px; font-weight: 600; }
+.defi-book { margin: 10px 0 0; align-items: center; flex-wrap: wrap; }
+.defi-book > span { font-size: 12.5px; color: var(--ink-2); padding: 0 6px 0 10px; }
+.defi-odds { margin-top: 10px; width: 100%; }
