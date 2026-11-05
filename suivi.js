@@ -150,6 +150,31 @@ function statRow(label, st) {
     <td class="n ${st.roi > 0 ? 'good' : st.roi < 0 ? 'bad' : ''}">${st.roi == null ? '–' : `${sign(st.roi)}${pct1(st.roi)}`}</td></tr>`;
 }
 
+// ROI et CLV par compétition : paris joués (journal) et pronos de l'app, pour garder dans le mode
+// Rentabilité les compétitions qui rapportent et retirer les autres.
+function byLeagueTable(journal, hist) {
+  const rows = new Map();
+  const row = path => {
+    if (!rows.has(path)) rows.set(path, { path, bets: [], picks: [] });
+    return rows.get(path);
+  };
+  journal.forEach(j => j.path && row(j.path).bets.push(j));
+  hist.forEach(h => h.path && row(h.path).picks.push(h));
+  const list = [...rows.values()].filter(r => r.bets.length || r.picks.length)
+    .sort((a, b) => (b.bets.length - a.bets.length) || (b.picks.length - a.picks.length));
+  if (!list.length) return '';
+  const cell = (v, n) => (v == null ? '<td class="n">–</td>' : `<td class="n ${v > 0 ? 'good' : v < 0 ? 'bad' : ''}">${sign(v)}${pct1(v)}</td>`);
+  return `<h3 class="sub">Par compétition</h3>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Compétition</th><th class="n">Paris</th><th class="n">ROI</th><th class="n">CLV</th><th class="n">Pronos</th><th class="n">ROI pronos</th></tr></thead>
+      <tbody>${list.map(r => {
+        const js = journalStats(r.bets), ps = pickStats(r.picks);
+        const src = SRC_BY_PATH.get(r.path);
+        return `<tr><td>${esc(src?.league || r.path)}${src && !isActive(r.path) ? ' <small class="hint">(non suivie)</small>' : ''}</td><td class="n">${r.bets.length}</td>${cell(js.roi)}${cell(js.clv)}<td class="n">${ps.n}</td>${cell(ps.roi)}</tr>`;
+      }).join('')}</tbody></table></div>
+    <p class="hint">Après 30 à 50 paris dans une compétition, une CLV négative est le signal pour la retirer (réglages ⚙, « Compétitions suivies »).</p>`;
+}
+
 function renderSuivi() {
   if (ui.tab !== 'suivi') return;
   const s = settings();
@@ -190,6 +215,7 @@ function renderSuivi() {
     <h3 class="sub">Journal des paris joués</h3>
     ${journal.length ? `<ul class="journal">${rows}</ul><button type="button" class="ghost" id="export-csv">Exporter le journal (CSV)</button>`
       : '<p class="defi-empty">Aucun pari noté. Dans le détail d’un match, touchez « J’ai joué un pari sur ce match » : le pari est réglé automatiquement après le match.</p>'}
+    ${byLeagueTable(journal, Object.values(store.get('pdj-history', {})).filter(h => h.won !== null))}
     <h3 class="sub">Bilan des pronos de l’app (60 jours)</h3>
     ${hist.length ? `<div class="table-wrap"><table>
       <thead><tr><th>Pronos</th><th class="n">Nb</th><th class="n">Réussis</th><th class="n">Attendu</th><th class="n">ROI</th></tr></thead>

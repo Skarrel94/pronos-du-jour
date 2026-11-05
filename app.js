@@ -88,6 +88,39 @@ const SOURCES = [
 ];
 const SRC_BY_PATH = new Map(SOURCES.map(s => [s.path, s]));
 
+// ---------- Mode Rentabilité ----------
+// Compétitions conseillées à un parieur qui ne cherche que la rentabilité : Pinnacle y est une
+// référence fiable, les bookmakers français les proposent largement, et leurs cotes y suivent
+// parfois Pinnacle avec retard. prio : ordre de chargement des vraies cotes (1 = d'abord).
+// Optionnelles : intéressantes mais moins de value ou plus chères en crédits, décochées au départ.
+// Les autres restent disponibles dans les réglages ou en mode « Toutes les compétitions ».
+const PROFILE = {
+  'uefa.champions': [1], 'eng.1': [1], 'esp.1': [1], 'ita.1': [1], 'ger.1': [1], 'fra.1': [1],
+  'tennis/atp': [1], 'tennis/wta': [1], 'uefa.europa': [1],
+  'uefa.europa.conf': [2], 'fra.2': [2], 'eng.2': [2], 'ger.2': [2], 'ita.2': [2], 'por.1': [2], 'ned.1': [2],
+  'basketball/nba': [2], 'fifa.world': [2],
+  'hockey/nhl': [3, true], 'football/nfl': [3, true], 'rugby/270559': [3, true], 'rugby/271937': [3, true],
+  'rugby/180659': [3, true], 'uefa.nations': [3, true], 'fifa.worldq.uefa': [3, true],
+  'fra.coupe_de_france': [3, true], 'eng.fa': [3, true], 'eng.league_cup': [3, true], 'esp.copa_del_rey': [3, true],
+  'ita.coppa_italia': [3, true], 'ger.dfb_pokal': [3, true], 'caf.nations': [3, true],
+};
+for (const src of SOURCES) {
+  const [prio, optional] = PROFILE[src.path.replace(/^soccer\//, '')] || PROFILE[src.path] || [9, null];
+  src.prio = prio;
+  src.tier = prio === 9 ? 'out' : optional ? 'option' : 'core';
+}
+const CORE_PATHS = SOURCES.filter(s => s.tier === 'core').map(s => s.path);
+// Compétitions suivies selon les réglages (mode Rentabilité : sélection conseillée ou personnalisée)
+function activePaths() {
+  const s = settings();
+  if (s.mode === 'tout') return new Set(SOURCES.map(x => x.path));
+  return new Set((s.leagues || CORE_PATHS).filter(p => SRC_BY_PATH.has(p)));
+}
+const isActive = path => activePaths().has(path);
+const activeSources = () => { const a = activePaths(); return SOURCES.filter(x => a.has(x.path)); };
+// Coût The Odds API d'une compétition : 2 crédits au foot, 1 au tennis et au MMA, 3 ailleurs
+const oddsCost = src => (src.sport === 'soccer' ? 2 : src.sport === 'tennis' || src.sport === 'mma' ? 1 : 3);
+
 const SPORT_ORDER = ['soccer', 'tennis', 'basketball', 'rugby', 'hockey', 'football', 'baseball', 'mma', 'afl'];
 
 // ---------- Stockage local ----------
@@ -115,7 +148,7 @@ const store = {
     } catch { return false; }
   },
 };
-const DEFAULT_SETTINGS = { key: '', maxCredits: 20, bankroll: 0, kelly: 0.25, maxPct: 3, books: ['betclic', 'winamax'] };
+const DEFAULT_SETTINGS = { key: '', maxCredits: 20, bankroll: 0, kelly: 0.25, maxPct: 3, books: ['betclic', 'winamax'], mode: 'rentabilite', leagues: null };
 const settings = () => ({ ...DEFAULT_SETTINGS, ...store.get('pdj-settings', {}) });
 // Le moteur choisit la meilleure cote parmi les bookmakers où l'utilisateur a un compte
 const applyPrefs = () => { Engine.prefs.books = settings().books.length ? settings().books : DEFAULT_SETTINGS.books; };
@@ -271,14 +304,17 @@ async function pool(items, size, fn) {
 // Interroge toutes les sources (8 en parallèle) ; une source en échec n'arrête pas les autres.
 async function fetchDay(day, onProgress) {
   const dates = espnDatesFor(day);
-  const ranks = { atp: await getRanks('atp'), wta: await getRanks('wta') };
+  const tours = new Set(activeSources().map(x => x.tour).filter(Boolean));
+  const [atp, wta] = await Promise.all(['atp', 'wta'].map(t => (tours.has(t) ? getRanks(t) : null)));
+  const ranks = { atp, wta };
   const matches = [];
   const failed = [];
   let done = 0;
-  await pool(SOURCES, 8, async src => {
+  const sources = activeSources();
+  await pool(sources, 8, async src => {
     try { matches.push(...await fetchSource(src, dates, day, ranks[src.tour])); }
     catch { failed.push(src.league); }
-    onProgress(++done, SOURCES.length);
+    onProgress(++done, sources.length);
   });
   const seen = new Set();
   return {
@@ -372,7 +408,7 @@ async function fetchBooks(matches, day, onProgress) {
   const jobs = [...groups.values()]
     .map(g => ({ ...g, key: oddsKeyFor(g, sports) }))
     .filter(g => g.key)
-    .sort((a, b) => b.matches.length - a.matches.length);
+    .sort(byPriority);
   const [from, to] = dayBounds(day).map(d => d.toISOString().replace(/\.\d{3}Z$/, 'Z'));
   const covered = new Set();
   let spent = 0;
@@ -381,7 +417,8 @@ async function fetchBooks(matches, day, onProgress) {
     const sport = SRC_BY_PATH.get(job.path).sport;
     const markets = sport === 'soccer' ? 'h2h,totals' : sport === 'tennis' || sport === 'mma' ? 'h2h' : 'h2h,spreads,totals';
     const cost = markets.split(',').length;
-    if (spent + cost > maxCredits) break;
+    // Plafond atteint : on passe aux compétitions suivantes, moins chères (un tournoi de tennis : 1 crédit)
+    if (spent + cost > maxCredits) continue;
     onProgress(`Cotes ${SRC_BY_PATH.get(job.path).league}…`);
     const url = `${ODDS_API}sports/${job.key}/odds?apiKey=${encodeURIComponent(key)}&bookmakers=${Object.keys(ODDS_BOOKS).join(',')}`
       + `&markets=${markets}&oddsFormat=decimal&commenceTimeFrom=${from}&commenceTimeTo=${to}`;
@@ -602,7 +639,7 @@ function settleMatch(m, preds, hist, journal) {
   const pr = preds[m.id];
   if (pr && !(m.id in hist)) {
     const won = Engine.settle(pr, res);
-    hist[m.id] = { won, p: pr.p, day: pr.day, odd: pr.odd, real: pr.real, value: pr.value, sport: pr.sport || m.sport, type: pr.type };
+    hist[m.id] = { won, p: pr.p, day: pr.day, odd: pr.odd, real: pr.real, value: pr.value, sport: pr.sport || m.sport, type: pr.type, path: pr.path };
   }
   for (const j of journal) {
     if (j.matchId !== m.id || j.status !== 'pending') continue;
@@ -716,7 +753,8 @@ const withAnalysis = m => ({ ...m, analysis: Engine.analyze(m) });
 
 function loadCached() {
   const c = store.get(cacheKey(selectedDay()), null);
-  ui.data = c ? { ...c, matches: c.matches.filter(m => SRC_BY_PATH.has(m.src?.path)).map(withAnalysis) } : null;
+  const active = activePaths();
+  ui.data = c ? { ...c, matches: c.matches.filter(m => active.has(m.src?.path)).map(withAnalysis) } : null;
 }
 
 // Réenregistre la journée (sans les analyses, recalculées à l'ouverture).
@@ -753,7 +791,7 @@ function setData(matches, extra = {}) {
   ui.data = {
     day: dayKey(selectedDay()), fetchedAt: same.fetchedAt || Date.now(), failed: same.failed || [], oddsAt: same.oddsAt,
     ...extra, hiddenIds,
-    matches: matches.filter(m => !hiddenIds.includes(m.id)).map(withAnalysis),
+    matches: matches.filter(m => !hiddenIds.includes(m.id) && isActive(m.src.path)).map(withAnalysis),
   };
   saveDay();
   rememberPicks(ui.data.matches);
@@ -795,17 +833,29 @@ async function update() {
   }
 }
 
-// Coût estimé d'un chargement des vraies cotes (le réel dépend des compétitions reconnues).
+// Ordre de chargement des vraies cotes : priorité de la compétition (grands championnats et tennis
+// d'abord), puis nombre de matchs.
+function byPriority(a, b) {
+  const pa = SRC_BY_PATH.get(a.path)?.prio ?? 9, pb = SRC_BY_PATH.get(b.path)?.prio ?? 9;
+  return pa - pb || b.matches.length - a.matches.length;
+}
+
+// Coût estimé d'un chargement des vraies cotes, dans l'ordre et la limite réellement appliqués.
 function estimateCost() {
   if (!ui.data) return 0;
   const groups = new Map();
   for (const m of ui.data.matches) {
     if (m.state !== 'pre' || m.canceled) continue;
-    const s = SRC_BY_PATH.get(m.src.path);
-    if (!s || !(s.odds || s.oddsTitle || s.sport === 'tennis')) continue;
-    groups.set(`${m.src.path}|${m.tournament || ''}`, s.sport === 'soccer' ? 2 : s.sport === 'tennis' || s.sport === 'mma' ? 1 : 3);
+    const src = SRC_BY_PATH.get(m.src.path);
+    if (!src || !(src.odds || src.oddsTitle || src.sport === 'tennis')) continue;
+    const k = `${m.src.path}|${m.tournament || ''}`;
+    if (!groups.has(k)) groups.set(k, { path: m.src.path, matches: [], cost: oddsCost(src) });
+    groups.get(k).matches.push(m);
   }
-  return Math.min(settings().maxCredits, [...groups.values()].reduce((a, b) => a + b, 0));
+  const max = settings().maxCredits;
+  let total = 0;
+  for (const g of [...groups.values()].sort(byPriority)) if (total + g.cost <= max) total += g.cost;
+  return total;
 }
 
 // Demande toujours une confirmation avant de dépenser des crédits The Odds API.
@@ -1257,6 +1307,8 @@ function openSettings() {
   $('#bankroll').value = s.bankroll || '';
   $('#kelly').value = String(s.kelly);
   $('#max-pct').value = s.maxPct;
+  document.querySelectorAll('input[name=mode]').forEach(r => { r.checked = r.value === s.mode; });
+  renderLeaguesPick(s.mode, new Set(s.leagues || CORE_PATHS));
   $('#my-books').innerHTML = Object.entries(Engine.BOOKS).map(([k, n]) =>
     `<label class="check"><input type="checkbox" value="${k}" ${s.books.includes(k) ? 'checked' : ''}> ${esc(n)}</label>`).join('');
   const c = store.get('pdj-credits', null);
@@ -1272,13 +1324,33 @@ function saveSettings(e) {
   const kelly = Number($('#kelly').value) || 0.25;
   const maxPct = Math.max(0.5, Math.min(10, Number(String($('#max-pct').value).replace(',', '.')) || 3));
   const books = [...document.querySelectorAll('#my-books input:checked')].map(i => i.value);
+  const mode = document.querySelector('input[name=mode]:checked')?.value || 'rentabilite';
+  const picked = [...document.querySelectorAll('#leagues-pick input:checked')].map(i => i.value);
+  // Sélection identique à la sélection conseillée : on garde « null » pour suivre les futures mises à jour
+  const leagues = picked.length && (picked.length !== CORE_PATHS.length || picked.some(p => !CORE_PATHS.includes(p))) ? picked : null;
   const old = settings();
-  store.set('pdj-settings', { ...old, key, maxCredits, bankroll, kelly, maxPct, books: books.length ? books : DEFAULT_SETTINGS.books });
+  const before = [...activePaths()].sort().join();
+  store.set('pdj-settings', { ...old, key, maxCredits, bankroll, kelly, maxPct, books: books.length ? books : DEFAULT_SETTINGS.books, mode, leagues });
+  const changed = before !== [...activePaths()].sort().join();
   applyPrefs();
   $('#settings').close();
-  toast(key && key !== old.key ? 'Clé enregistrée : appuyez sur « Charger les vraies cotes »' : !key && old.key ? 'Clé supprimée : les cotes seront estimées' : 'Réglages enregistrés');
-  if (ui.data) ui.data.matches = ui.data.matches.map(m => withAnalysis(strip(m)));
+  toast(changed ? 'Compétitions modifiées : appuyez sur « Mettre à jour » pour recharger la journée'
+    : key && key !== old.key ? 'Clé enregistrée : appuyez sur « Charger les vraies cotes »' : !key && old.key ? 'Clé supprimée : les cotes seront estimées' : 'Réglages enregistrés');
+  if (changed) loadCached();
+  else if (ui.data) ui.data.matches = ui.data.matches.map(m => withAnalysis(strip(m)));
   render();
+}
+
+// Liste des compétitions à cocher (mode Rentabilité), par groupe
+function renderLeaguesPick(mode, checked) {
+  const groups = [['core', 'Conseillées'], ['option', 'Optionnelles (moins de value ou plus chères en crédits)'], ['out', 'Déconseillées (cote Pinnacle peu fiable ou absente, peu de paris en France)']];
+  const label = s => `${s.league}${s.sport !== 'soccer' ? ` (${Engine.SPORT_CFG[s.sport].label})` : ''}`;
+  $('#leagues-pick').innerHTML = `<fieldset class="leagues" ${mode === 'tout' ? 'disabled' : ''}>
+    ${groups.map(([t, title]) => `<details ${t !== 'out' ? 'open' : ''}><summary>${esc(title)} <small>${SOURCES.filter(s => s.tier === t && checked.has(s.path)).length}/${SOURCES.filter(s => s.tier === t).length}</small></summary>
+      <div class="checks">${SOURCES.filter(s => s.tier === t).sort((a, b) => a.prio - b.prio).map(s =>
+        `<label class="check"><input type="checkbox" value="${esc(s.path)}" ${checked.has(s.path) ? 'checked' : ''}> ${esc(label(s))}</label>`).join('')}</div></details>`).join('')}
+    <button type="button" class="ghost" id="leagues-reset">Rétablir la sélection conseillée</button>
+  </fieldset>`;
 }
 
 function saveUi() { store.set('pdj-ui', { dayOffset: ui.dayOffset, status: ui.status, tab: ui.tab }); }
@@ -1302,6 +1374,15 @@ function bind() {
   $('#odds-hint-open').addEventListener('click', openSettings);
   $('#settings-form').addEventListener('submit', saveSettings);
   $('#settings-cancel').addEventListener('click', () => $('#settings').close());
+  $('#settings').addEventListener('change', e => {
+    if (e.target.name === 'mode') {
+      const checked = new Set([...document.querySelectorAll('#leagues-pick input:checked')].map(i => i.value));
+      renderLeaguesPick(e.target.value, checked);
+    }
+  });
+  $('#settings').addEventListener('click', e => {
+    if (e.target.id === 'leagues-reset') renderLeaguesPick('rentabilite', new Set(CORE_PATHS));
+  });
   $('#confirm-cancel').addEventListener('click', () => $('#confirm-odds').close('cancel'));
   document.querySelectorAll('[data-tab]').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));
   // Bouton « revenir en haut », visible dès qu'on a fait défiler la page

@@ -130,7 +130,8 @@
 
 <dialog id="settings" class="sheet" aria-labelledby="settings-title">
   <form id="settings-form">
-    <h2 id="settings-title">Vraies cotes Betclic et Winamax</h2>
+    <h2 id="settings-title">Réglages</h2>
+    <h2 class="sheet-sub">Vraies cotes (The Odds API)</h2>
     <p>L’app lit les cotes réelles via <b>The Odds API</b>. La clé est gratuite (500 crédits par mois) :</p>
     <ol>
       <li>Allez sur <a href="https://the-odds-api.com/#get-access" target="_blank" rel="noopener">the-odds-api.com</a> et choisissez l’offre <b>Starter (gratuite)</b>.</li>
@@ -140,12 +141,20 @@
     <input id="api-key" type="text" autocomplete="off" spellcheck="false" placeholder="ex. 3f9c…">
     <label for="max-credits">Crédits maximum par actualisation</label>
     <input id="max-credits" type="number" min="1" max="100" step="1" inputmode="numeric">
-    <p class="hint">Une compétition coûte 1 à 3 crédits. Avec 15 crédits par jour, l’offre gratuite tient tout le mois. Les compétitions qui ont le plus de matchs passent en premier. Chaque requête lit aussi Unibet, Parions Sport, PMU, NetBet et la cote de référence Pinnacle, sans crédit en plus.</p>
+    <p class="hint">Une compétition coûte 1 à 3 crédits. Avec 15 crédits par jour, l’offre gratuite tient tout le mois. Les grands championnats et le tennis passent en premier ; si le plafond est atteint, l’app complète avec les compétitions moins chères. Chaque requête lit aussi Unibet, Parions Sport, PMU, NetBet et la cote de référence Pinnacle, sans crédit en plus.</p>
     <p id="credits" class="hint"></p>
 
     <h2 class="sheet-sub">Mes bookmakers</h2>
     <p class="hint">La meilleure cote et les paris value sont cherchés uniquement chez les bookmakers cochés (ceux où vous avez un compte).</p>
     <div id="my-books" class="checks"></div>
+
+    <h2 class="sheet-sub">Compétitions suivies</h2>
+    <div class="seg modes" role="radiogroup" aria-label="Compétitions suivies">
+      <label class="check"><input type="radio" name="mode" value="rentabilite"> Mode Rentabilité (conseillé)</label>
+      <label class="check"><input type="radio" name="mode" value="tout"> Toutes les compétitions</label>
+    </div>
+    <p class="hint">Mode Rentabilité : uniquement les compétitions où la cote Pinnacle est une référence fiable et où les sites français laissent passer de la value. Moins de matchs affichés, des crédits dépensés là où ça compte (grands championnats et tennis chargés en premier).</p>
+    <div id="leagues-pick"></div>
 
     <h2 class="sheet-sub">Bankroll et mises</h2>
     <label for="bankroll">Bankroll de départ (€)</label>
