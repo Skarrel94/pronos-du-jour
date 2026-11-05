@@ -4,41 +4,40 @@ Application web (installable sur Android) qui liste les matchs du jour proposés
 
 ## Ce qu'elle fait
 
-- **Bouton « Mettre à jour » (gratuit)** : interroge environ 70 compétitions couvertes par Betclic et Winamax (une cinquantaine de championnats et coupes de football, tennis ATP/WTA, basket NBA/WNBA/NCAA, rugby Top 14/Premiership/URC/Champions Cup…, hockey NHL, NFL, MLB, UFC, AFL) pour aujourd'hui ou demain.
-- **Estimation pour chaque match** : uniquement des paris proposés par Betclic et Winamax (1N2, double chance, remboursé si nul, plus/moins de buts, les deux équipes marquent, handicap, nombre de sets au tennis…), avec la probabilité, la « cote juste » et la cote **Betclic** et **Winamax** : réelle avec une clé The Odds API, sinon estimée (marquée ≈).
-- **Compos (football)** : compos officielles chargées automatiquement pour les matchs qui commencent dans moins de 80 min (bouton « Charger les compos » sinon). Avant leur publication, compo probable = les 11 joueurs les plus titularisés, moins les blessés connus. Les titulaires habituels absents (buts et passes perdus, défenseurs, gardien) modifient les buts attendus.
-- **Scores en direct (gratuit)** : app ouverte, les matchs en cours se mettent à jour toutes les minutes, et les compos des matchs proches toutes les 5 minutes.
-- **Bouton « Charger les vraies cotes »** (seul à utiliser des crédits The Odds API) : affiche son coût estimé avant de dépenser.
-- **Bouton « Charger compos et stats » / « Revérifier »** dans chaque match (gratuit) : recalcule le prono avec les compos, les 5 derniers matchs, les confrontations directes et les blessés, et affiche l'effet (avant → après).
-- **Top 5 du jour** et un **combiné de 3 matchs**.
-- **Bilan** : chaque pronostic est mémorisé avant le match, puis marqué gagné ou perdu une fois le match terminé.
+- **Bouton « Mettre à jour » (gratuit)** : interroge environ 70 compétitions couvertes par Betclic et Winamax (football, tennis ATP/WTA, basket NBA/WNBA, rugby, NHL, NFL, MLB, UFC, AFL) pour aujourd'hui ou demain. Elle règle aussi les pronos et paris des 7 jours précédents restés en attente.
+- **Paris value du jour** : avec une clé The Odds API, l'app lit la cote de **Pinnacle** (le bookmaker de référence des parieurs professionnels) et la compare aux vraies cotes de Betclic, Winamax, Unibet, Parions Sport, PMU et NetBet. Un pari est **value** quand votre bookmaker paie au moins 2 % de plus que la cote juste Pinnacle. Sans pari value, l'app le dit : ne pas parier est aussi une décision gagnante.
+- **Pronos indicatifs** : les issues les plus probables à une cote correcte, clairement séparées des paris value (pas d'avantage prouvé).
+- **Comparateur de cotes** : pour chaque pari, cotes Betclic, Winamax et meilleure cote des autres sites français.
+- **Mise conseillée** : Kelly fractionné (1/4 par défaut), plafonné à 3 % de la bankroll, uniquement sur les paris value.
+- **Onglet Suivi** : journal des paris réellement joués (réglés automatiquement), bankroll, bénéfice, ROI, **CLV** (cote prise comparée à la cote juste au coup d'envoi), bilan des pronos de l'app par type et par sport, calibration, export CSV.
+- **Compos (football)**, **scores en direct** et **estimation en direct** comme avant.
+- **Onglet Défis & freebets** : lecture des captures de défis, plus deux outils : **convertir un freebet** (les paris qui en récupèrent le plus de valeur) et **cote boostée : rentable ou pas ?**
 - Fonctionne hors connexion avec les dernières données chargées.
 
 ## Comment les pronostics sont calculés
 
-1. Une **note de force** par équipe : bilan de la saison (victoires/nuls/défaites), forme sur les 5 derniers matchs, bilan à domicile ou à l'extérieur.
-2. Les **cotes du marché** sont converties en probabilités, marge retirée : vraies cotes Betclic/Winamax si une clé est configurée, sinon cotes internationales publiées par ESPN. Elles comptent pour 70 % de l'estimation : le marché est l'indicateur le plus fiable.
-3. Football : un modèle de Poisson (buts attendus) donne les scores, plus/moins de buts et « les deux équipes marquent ». Sports collectifs : une loi normale sur l'écart de points et le total. Tennis : les points au classement mondial.
-4. **Données avancées** : force d'attaque et de défense de chaque équipe (buts ou points marqués / encaissés par match, d'après le classement, comparés à la moyenne du championnat), 5 derniers matchs, confrontations directes, blessés (basket, NFL, hockey). Elles comptent davantage à mesure que la saison avance (rien sous 5 matchs joués, plein poids à 10).
-5. Football : les compos corrigent les buts attendus. Officielle : titulaires habituels absents du onze. Probable : onze du dernier match moins les blessés connus (effet compté à 60 %). Seuls les vrais piliers comptent, et l'effet est plafonné, car le remplaçant compense une partie de l'absence.
-6. Le « meilleur pari » doit offrir une cote Betclic/Winamax d'au moins 1,30 ; il favorise la meilleure espérance de gain à cette cote.
+1. **Référence de marché** : cotes Pinnacle (sinon Betfair Exchange) sans marge. La marge est retirée par la méthode « power », qui corrige le biais favori / outsider. Avec Pinnacle, la probabilité affichée est celle du marché seul : un petit modèle statistique ne fait pas mieux qu'un bookmaker sharp.
+2. Sans Pinnacle : moyenne des bookmakers français (ou des cotes ESPN), mélangée à 70 % avec le modèle statistique. Dans ce cas, aucun pari n'est marqué value.
+3. **Modèle statistique** : note de force (bilan, forme, domicile/extérieur), force d'attaque et de défense, 5 derniers matchs, confrontations directes. Football : loi de Poisson avec correction de Dixon-Coles (0-0 et 1-1 un peu plus fréquents). Sports collectifs : loi normale sur l'écart et le total (rugby en 1N2, avec le nul). Tennis : points ATP/WTA, au meilleur des 5 sets en Grand Chelem masculin.
+4. **Compos et blessés** : effet complet sans cote ; réduit quand des cotes existent (le marché les intègre déjà) ; nul si les cotes Pinnacle ont été relevées après la compo officielle.
+5. **Règlement** : football sur le temps réglementaire (90 minutes, prolongation exclue) comme les bookmakers ; hockey : victoire prolongation comprise (vérifiez le marché joué, le 1N2 temps réglementaire est différent).
 
-**Règle d'or** : ne jouez un pari que si la cote de votre bookmaker est *supérieure* à la « cote juste » affichée.
+**Règle d'or** : ne jouez un pari que si la cote de votre bookmaker est *supérieure* à la « cote juste » affichée, et suivez votre CLV : c'est le meilleur indicateur que vous battez le marché.
 
 ## Vraies cotes Betclic et Winamax (facultatif, gratuit)
 
 1. Créez un compte sur https://the-odds-api.com (offre **Starter**, gratuite : 500 crédits par mois).
 2. Dans l'app, touchez l'icône ⚙ (en haut), collez la clé reçue par e-mail, puis **Enregistrer**. Le bouton **« Charger les vraies cotes »** apparaît sous la date.
-3. Une compétition coûte 1 à 3 crédits par actualisation. Le réglage « Crédits maximum par actualisation » (20 par défaut, 15 conseillé pour tenir le mois) limite la dépense. Le nombre de crédits restants s'affiche dans les réglages.
+3. Une compétition coûte 1 à 3 crédits par actualisation (une requête lit jusqu'à 10 bookmakers pour le même prix : les 6 sites français, Pinnacle et Betfair). Le réglage « Crédits maximum par actualisation » (20 par défaut, 15 conseillé pour tenir le mois) limite la dépense. Le nombre de crédits restants s'affiche dans les réglages.
 
-Avec une clé, les matchs que ni Betclic ni Winamax ne proposent sont retirés de la liste.
+Avec une clé, les matchs qu'aucun bookmaker français ne propose sont retirés de la liste. Dans les réglages ⚙, cochez les bookmakers où vous avez un compte et indiquez votre bankroll pour voir les mises conseillées.
 
 ## Installer l'app sur votre téléphone Android
 
 L'app doit être en ligne en https pour s'ouvrir sur le téléphone et s'installer. Le plus simple et gratuit : **GitHub Pages**.
 
 1. Créez un compte gratuit sur https://github.com, puis cliquez sur **New repository** (nom : `pronos-du-jour`, *Public*).
-2. Sur la page du dépôt : **Add file → Upload files**, glissez-y *tout le contenu* de ce dossier (`index.html`, `app.js`, `engine.js`, `styles.css`, `sw.js`, `manifest.webmanifest` et le dossier `icons`), puis **Commit changes**.
+2. Sur la page du dépôt : **Add file → Upload files**, glissez-y *tout le contenu* de ce dossier (`index.html`, `app.js`, `engine.js`, `suivi.js`, `defis.js`, `styles.css`, `sw.js`, `manifest.webmanifest` et le dossier `icons`), puis **Commit changes**.
 3. **Settings → Pages → Branch : `main` / `(root)` → Save**. Au bout d'environ 1 minute l'adresse s'affiche : `https://<votre-pseudo>.github.io/pronos-du-jour/`.
 4. Sur le téléphone, ouvrez cette adresse dans **Chrome**, puis menu **⋮ → Ajouter à l'écran d'accueil / Installer l'application**.
 
@@ -51,6 +50,12 @@ node serve.js
 ```
 
 puis ouvrez http://localhost:5173.
+
+Tests du moteur de pronostics (Node 18 ou plus) :
+
+```bash
+node --test tests/*.test.js
+```
 
 ## Limites
 
